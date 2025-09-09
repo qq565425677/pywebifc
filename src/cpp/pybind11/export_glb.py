@@ -243,21 +243,7 @@ def _group_flat_nodes_by_express_id(
 ) -> Dict[int, List[Dict[str, Any]]]:
     grouped: Dict[int, List[Dict[str, Any]]] = {}
     for n in nodes:
-        eid: Optional[int] = None
-        if "express_id" in n:
-            try:
-                eid = int(n["express_id"])  # type: ignore[arg-type]
-            except Exception:
-                eid = None
-        if eid is None:
-            name = n.get("name")
-            if isinstance(name, str) and name.startswith("#"):
-                try:
-                    eid = int(name[1:])
-                except Exception:
-                    pass
-        if eid is None:
-            continue
+        eid = n["express_id"]
         grouped.setdefault(eid, []).append(n)
     return grouped
 
@@ -266,40 +252,13 @@ def build_hierarchical_nodes(
     g: Dict[str, Any], hierarchy: Dict[str, Any], *, add_group_node: bool = True
 ) -> Dict[str, Any]:
     # Build a fresh nodes/scenes list representing the IFC spatial tree.
-    flat_nodes: List[Dict[str, Any]] = g.get("nodes", [])
-    placements_by = _group_flat_nodes_by_express_id(flat_nodes)
+    grouped_node_geoms = g.get("grouped_node_geoms", {})
 
-    children_map: Dict[int, List[int]] = {}
-    for k, v in hierarchy.get("children", {}).items():
-        try:
-            pk = int(k)
-        except Exception:
-            continue
-        lst = []
-        if isinstance(v, list):
-            for x in v:
-                try:
-                    lst.append(int(x))
-                except Exception:
-                    pass
-        children_map[pk] = lst
-
-    names_map: Dict[int, str] = {}
-    for k, v in hierarchy.get("names", {}).items():
-        try:
-            names_map[int(k)] = str(v)
-        except Exception:
-            continue
-
-    roots: List[int] = []
-    for x in hierarchy.get("roots", []) or []:
-        try:
-            roots.append(int(x))
-        except Exception:
-            continue
+    children_map = hierarchy.get("children", {})
+    names_map = hierarchy.get("names", {})
+    roots = hierarchy.get("roots", [])
 
     nodes: List[Dict[str, Any]] = []
-    index_by_id: Dict[int, int] = {}
 
     def make_node(
         name: Optional[str] = None,
@@ -307,6 +266,7 @@ def build_hierarchical_nodes(
         mesh: Optional[int] = None,
         matrix: Optional[List[float]] = None,
         children: Optional[List[int]] = None,
+        extras: Optional[Dict[str, Any]] = None,
     ) -> int:
         n: Dict[str, Any] = {}
         if name is not None:
@@ -317,6 +277,8 @@ def build_hierarchical_nodes(
             n["matrix"] = matrix
         if children:
             n["children"] = children
+        if extras:
+            n["extras"] = extras
         nodes.append(n)
         return len(nodes) - 1
 
@@ -330,36 +292,31 @@ def build_hierarchical_nodes(
             built_child_indices.append(build_subtree(cid))
 
         # If this is an element with geometry placements, attach them as leaf nodes
-        placement_nodes: List[int] = []
-        for placement in placements_by.get(elt_id, []):
-            mesh_idx = placement.get("mesh")
-            matrix = placement.get("matrix")
-            if mesh_idx is None:
-                continue
-            placement_nodes.append(make_node(mesh=mesh_idx, matrix=matrix))
+        geo_nodes: List[int] = []
+        for id, geo in grouped_node_geoms.get(elt_id, {}).items():
+            mesh_idx = geo.get("mesh")
+            matrix = geo.get("matrix")
+            name = f"#{id}"
+            extras = {"id": id}
+            geo_nodes.append(
+                make_node(name=name, mesh=mesh_idx, matrix=matrix, extras=extras)
+            )
 
         element_children: List[int] = []
         element_children.extend(built_child_indices)
-        if placement_nodes:
-            if add_group_node and len(placement_nodes) > 1:
-                # Optional Group_1 level to mirror viewer-like expansion
-                grp_idx = make_node("Group_1", children=placement_nodes)
-                element_children.append(grp_idx)
-            else:
-                element_children.extend(placement_nodes)
+        element_children.extend(geo_nodes)
 
         # Name: prefer IfcRoot.Name, fallback to #id
-        nm = names_map.get(elt_id, f"#{elt_id}")
-        idx = make_node(nm, children=element_children or None)
-        index_by_id[elt_id] = idx
+        name = names_map.get(elt_id, f"#{elt_id}")
+        extras = {"id": elt_id}
+        children = element_children if element_children else None
+        idx = make_node(name=name, children=children, extras=extras)
         return idx
 
-    scene_root_indices: List[int] = []
+    scenes: List[Dict[str, List[int]]] = []
     for r in roots:
-        scene_root_indices.append(build_subtree(r))
-
-    scene = {"nodes": scene_root_indices}
-    return {"nodes": nodes, "scenes": [scene]}
+        scenes.append({"nodes": [build_subtree(r)]})
+    return {"nodes": nodes, "scenes": scenes}
 
 
 def ensure_build_path_on_sys_path() -> None:

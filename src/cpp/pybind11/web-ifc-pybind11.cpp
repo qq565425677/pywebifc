@@ -178,10 +178,9 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
     }
 
     // Outputs
-    py::list scenes;    // will contain one scene referencing all nodes
-    py::list nodes;     // node objects
-    py::list meshes;    // mesh objects
-    py::list materials; // material objects (simple baseColor only)
+    py::dict groupedNodeGeoms; // express_id -> geometry_express_id -> meshIdx, matrix
+    py::list meshes;           // mesh objects
+    py::list materials;        // material objects (simple baseColor only)
 
     // Dedup maps
     std::unordered_map<uint32_t, uint32_t> geomIdToMeshIdx;  // geometryExpressID -> mesh index
@@ -268,42 +267,31 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
     };
 
     // Build nodes from flat meshes
-    py::list sceneNodes;
     for (auto id : expressIds)
     {
         webifc::geometry::IfcFlatMesh flat = geomProc->GetFlatMesh(id);
+        if (flat.geometries.empty())
+            continue;
+        groupedNodeGeoms[py::int_(id)] = py::dict();
         for (auto &pg : flat.geometries)
         {
             uint32_t matIdx = get_material_index(pg);
             uint32_t meshIdx = ensure_mesh_for_geometry(pg.geometryExpressID, matIdx);
 
-            py::dict node;
-            node["mesh"] = py::int_(meshIdx);
-            // Include express_id for easier regrouping on Python side
-            node["express_id"] = py::int_(flat.expressID);
-            node["geometry_express_id"] = py::int_(pg.geometryExpressID);
-            // Name equals the entity's #id per request
-            node["name"] = std::string("#") + std::to_string(flat.expressID);
+            py::dict geoNode;
+            geoNode["mesh"] = py::int_(meshIdx);
 
             py::list mat;
             for (int i = 0; i < 16; ++i)
                 mat.append(pg.flatTransformation[i]);
-            node["matrix"] = std::move(mat);
+            geoNode["matrix"] = std::move(mat);
 
-            uint32_t nodeIdx = static_cast<uint32_t>(nodes.size());
-            nodes.append(std::move(node));
-            sceneNodes.append(py::int_(nodeIdx));
+            groupedNodeGeoms[py::int_(id)][py::int_(pg.geometryExpressID)] = std::move(geoNode);
         }
     }
 
-    // One scene referencing all nodes we created
-    py::dict scene;
-    scene["nodes"] = std::move(sceneNodes);
-    scenes.append(std::move(scene));
-
     py::dict out;
-    out["scenes"] = std::move(scenes);
-    out["nodes"] = std::move(nodes);
+    out["grouped_node_geoms"] = std::move(groupedNodeGeoms);
     out["meshes"] = std::move(meshes);
     out["materials"] = std::move(materials);
     return out;
