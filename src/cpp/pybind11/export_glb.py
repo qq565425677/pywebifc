@@ -249,7 +249,7 @@ def _group_flat_nodes_by_express_id(
 
 
 def build_hierarchical_nodes(
-    g: Dict[str, Any], hierarchy: Dict[str, Any], *, add_group_node: bool = True
+    g: Dict[str, Any], hierarchy: Dict[str, Any]
 ) -> Dict[str, Any]:
     # Build a fresh nodes/scenes list representing the IFC spatial tree.
     grouped_node_geoms = g.get("grouped_node_geoms", {})
@@ -368,7 +368,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         data = w.build_gltf_like(mid, args.types)
         # Build IFC spatial hierarchy and assemble hierarchical nodes in Python
         hierarchy = w.build_spatial_hierarchy(mid)
-        assembled = build_hierarchical_nodes(data, hierarchy, add_group_node=True)
+        assembled = build_hierarchical_nodes(data, hierarchy)
         data["nodes"] = assembled["nodes"]
         data["scenes"] = assembled["scenes"]
     finally:
