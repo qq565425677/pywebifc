@@ -238,16 +238,6 @@ def gltf_like_to_glb(
             f.write(bin_chunk)
 
 
-def _group_flat_nodes_by_express_id(
-    nodes: List[Dict[str, Any]],
-) -> Dict[int, List[Dict[str, Any]]]:
-    grouped: Dict[int, List[Dict[str, Any]]] = {}
-    for n in nodes:
-        eid = n["express_id"]
-        grouped.setdefault(eid, []).append(n)
-    return grouped
-
-
 def build_hierarchical_nodes(
     g: Dict[str, Any], hierarchy: Dict[str, Any]
 ) -> Dict[str, Any]:
