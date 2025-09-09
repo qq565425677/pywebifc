@@ -76,21 +76,21 @@ static bool IsModelOpen(uint32_t modelID)
 static uint32_t GetMaxExpressID(uint32_t modelID)
 {
     if (!manager().IsModelOpen(modelID))
-        return 0u;
+        throw std::runtime_error("Model not open");
     return manager().GetIfcLoader(modelID)->GetMaxExpressId();
 }
 
 static uint32_t GetLineType(uint32_t modelID, uint32_t expressID)
 {
     if (!manager().IsModelOpen(modelID))
-        return 0u;
+        throw std::runtime_error("Model not open");
     return manager().GetIfcLoader(modelID)->GetLineType(expressID);
 }
 
 static std::vector<uint32_t> GetAllLines(uint32_t modelID)
 {
     if (!manager().IsModelOpen(modelID))
-        return {};
+        throw std::runtime_error("Model not open");
     return manager().GetIfcLoader(modelID)->GetAllLines();
 }
 
@@ -281,6 +281,7 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
             node["mesh"] = py::int_(meshIdx);
             // Include express_id for easier regrouping on Python side
             node["express_id"] = py::int_(flat.expressID);
+            node["geometry_express_id"] = py::int_(pg.geometryExpressID);
             // Name equals the entity's #id per request
             node["name"] = std::string("#") + std::to_string(flat.expressID);
 
@@ -312,7 +313,7 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
 static std::string GetIfcRootNameSafely(webifc::parsing::IfcLoader *loader, uint32_t expressID)
 {
     if (!loader)
-        return std::string();
+        throw std::runtime_error("Loader is null");
     // IfcRoot attributes are first in the flattened list. Name is the third
     // argument after GlobalId and OwnerHistory (index 2). OwnerHistory may be
     // $, but position remains the same.
@@ -451,19 +452,19 @@ static py::dict BuildSpatialHierarchy(uint32_t modelID)
         py::list lst;
         for (auto c : kv.second)
             lst.append(py::int_(c));
-        py_children[std::to_string(kv.first).c_str()] = std::move(lst);
+        py_children[py::int_(kv.first)] = std::move(lst);
     }
 
     py::dict py_names;
     for (auto &kv : names)
     {
-        py_names[std::to_string(kv.first).c_str()] = kv.second;
+        py_names[py::int_(kv.first)] = kv.second;
     }
 
     py::dict py_types;
     for (auto &kv : types)
     {
-        py_types[std::to_string(kv.first).c_str()] = py::int_(kv.second);
+        py_types[py::int_(kv.first)] = py::int_(kv.second);
     }
 
     py::dict out;
