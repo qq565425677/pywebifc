@@ -70,3 +70,7 @@ src/cpp/_deps/glm-src/
 src/cpp/_deps/spdlog-src/
 src/cpp/_deps/tinycpptest-src/
 src/cpp/_deps/tinynurbs-src/
+
+# vscode
+src/cpp/.vscode/launch.json
+src/cpp/.vscode/settings.json
