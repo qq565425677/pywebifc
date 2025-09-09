@@ -15,7 +15,7 @@ Notes:
   - By default exports POSITION + INDICES. Use --normals to also export NORMALs
     if present in the glTF-like input. (No UVs.)
   - Each primitive becomes TRIANGLES with uint32 indices.
-  - Materials map to pbrMetallicRoughness(baseColorFactor) with metallicFactor=0.
+  - Materials map to pbrMetallicRoughness(baseColorFactor) with metallicFactor=0.5, roughnessFactor=0.8.
 """
 
 from __future__ import annotations
@@ -87,8 +87,8 @@ def gltf_like_to_glb(
             {
                 "pbrMetallicRoughness": {
                     "baseColorFactor": base,
-                    "metallicFactor": 0.0,
-                    "roughnessFactor": 1.0,
+                    "metallicFactor": 0.5,  # another default value can be 0.0
+                    "roughnessFactor": 0.8,  # another default value can be 1.0
                 }
             }
         )
