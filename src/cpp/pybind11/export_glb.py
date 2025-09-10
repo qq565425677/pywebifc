@@ -8,8 +8,8 @@ Pipeline:
   - pack into a valid GLB (glTF 2.0) without external deps
 
 Usage:
-  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
-  python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
+  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty] [--noClean]
+  python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty] [--noClean]
 
 Notes:
   - By default exports POSITION + INDICES. Use --normals to also export NORMALs
@@ -20,6 +20,10 @@ Notes:
   - Materials map to pbrMetallicRoughness(baseColorFactor). If
     --metallicFactor/--roughnessFactor are provided, they are written to GLB;
     otherwise these fields are omitted (glTF defaults apply).
+  - When normals are not exported, a lightweight NumPy-based clean runs per
+    primitive to deduplicate identical vertices and faces, drop degenerate
+    triangles, and compact unused vertices (similar to pyvista.clean but exact
+    float matches, no tolerance-based merging). Use --noClean to disable.
 """
 import argparse
 from typing import Any, Dict, List, Optional, Tuple
@@ -200,6 +204,73 @@ def _flip_winding_u32(idx_u32: np.ndarray) -> np.ndarray:
     return tri.reshape(-1)
 
 
+def _clean_mesh_numpy(
+    pos_f32_flat: np.ndarray,
+    idx_u32: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Lightweight mesh clean: deduplicate vertices and faces with NumPy.
+
+    - Removes duplicate vertices (exact float32 matches)
+    - Remaps indices accordingly
+    - Drops degenerate triangles (with repeated vertex indices)
+    - Drops duplicate triangles (ignoring winding by sorting vertex ids)
+    - Compacts to only used vertices
+
+    Args:
+        pos_f32_flat: Flat (N*3,) float32 positions array
+        idx_u32: Flat (M*3,) uint32 indices array
+
+    Returns:
+        (clean_pos_flat_float32, clean_idx_flat_uint32)
+    """
+    if pos_f32_flat.size == 0 or idx_u32.size == 0:
+        return pos_f32_flat, idx_u32
+
+    # Shapes
+    pos = pos_f32_flat.reshape(-1, 3)
+    tri = idx_u32.reshape(-1, 3)
+
+    # 1) Deduplicate vertices (exact matches) and get inverse map
+    # unique_pos[inverse[i]] == pos[i]
+    unique_pos, inverse = np.unique(pos, axis=0, return_inverse=True)
+
+    # Remap indices to unique vertex space
+    tri = inverse[tri]
+
+    # 2) Remove degenerate triangles (any repeated vertex within the triangle)
+    mask_non_degen = (
+        (tri[:, 0] != tri[:, 1]) & (tri[:, 1] != tri[:, 2]) & (tri[:, 0] != tri[:, 2])
+    )
+    if not np.all(mask_non_degen):
+        tri = tri[mask_non_degen]
+        if tri.size == 0:
+            # No triangles left; early out with compacted empty mesh
+            return unique_pos.astype(np.float32, copy=False).reshape(-1), np.empty(
+                (0,), dtype=np.uint32
+            )
+
+    # 3) Remove duplicate faces ignoring winding by sorting indices within each tri
+    tri_sorted = np.sort(tri, axis=1)
+    _, unique_face_idx = np.unique(tri_sorted, axis=0, return_index=True)
+    if unique_face_idx.size != tri.shape[0]:
+        unique_face_idx.sort()
+        tri = tri[unique_face_idx]
+
+    # 4) Compact to only used vertices
+    used_old = np.unique(tri.reshape(-1))
+    # Map old->new
+    remap = np.full(unique_pos.shape[0], -1, dtype=np.int64)
+    remap[used_old] = np.arange(used_old.size, dtype=np.int64)
+    tri_compact = remap[tri]
+    pos_compact = unique_pos[used_old]
+
+    # Return flattened arrays with correct dtypes
+    return (
+        np.ascontiguousarray(pos_compact, dtype=np.float32).reshape(-1),
+        np.ascontiguousarray(tri_compact, dtype=np.uint32).reshape(-1),
+    )
+
+
 def gltf_like_to_glb(
     g: Dict[str, Any],
     out_path: str,
@@ -208,6 +279,7 @@ def gltf_like_to_glb(
     metallic_factor: Optional[float] = None,
     roughness_factor: Optional[float] = None,
     warn_empty: bool = False,
+    clean: bool = True,
 ) -> None:
 
     gltf = GLTF2(
@@ -247,6 +319,17 @@ def gltf_like_to_glb(
                         f"Empty primitive skipped (mesh {mesh_idx}, prim {prim_idx})"
                     )
                 continue
+            # If not exporting normals and cleaning enabled, run a lightweight clean to deduplicate
+            # vertices/faces and drop degenerates for each primitive mesh.
+            if (not include_normals) and clean:
+                pos_f32, idx_u32 = _clean_mesh_numpy(pos_f32, idx_u32)
+                vcount = 0 if pos_f32.size == 0 else pos_f32.size // 3
+                if vcount == 0 or idx_u32.size == 0:
+                    if warn_empty:
+                        logging.warning(
+                            f"Primitive became empty after clean (mesh {mesh_idx}, prim {prim_idx})"
+                        )
+                    continue
             # Decide whether to flip winding
             do_flip = False
             if winding == "flip":
@@ -479,6 +562,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         action="store_true",
         help="Log warnings when primitives are empty or normals mismatch",
     )
+    ap.add_argument(
+        "--noClean",
+        dest="clean",
+        action="store_false",
+        default=True,
+        help="Disable per-primitive mesh clean when not exporting normals",
+    )
     args = ap.parse_args(argv)
 
     w = import_pywebifc()
@@ -511,6 +601,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             metallic_factor=args.metallicFactor,
             roughness_factor=args.roughnessFactor,
             warn_empty=args.warnEmpty,
+            clean=args.clean,
         )
     finally:
         w.close_model(mid)
