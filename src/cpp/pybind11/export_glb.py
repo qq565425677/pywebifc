@@ -20,10 +20,6 @@ Notes:
     otherwise these fields are omitted (glTF defaults apply).
 """
 import argparse
-import json
-import math
-import os
-import struct
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import sys
@@ -281,7 +277,9 @@ def gltf_like_to_glb(
     gltf.accessors = binb.accessors
     # Attach binary and save
     gltf.set_binary_blob(bytes(binb.blob))
-    gltf.save(out_path)
+    gltf.save(
+        out_path, asset=GLTFAsset(version="2.0", generator="pywebifc-glb-exporter")
+    )
 
 
 def build_hierarchical_nodes(
