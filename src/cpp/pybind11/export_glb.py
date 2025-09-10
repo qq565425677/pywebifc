@@ -380,7 +380,7 @@ def gltf_like_to_glb(
             )
             if has_normals:
                 acc_nrm_idx = binb.add_accessor(
-                    buffer_view=bv_nrm_idx,
+                    buffer_view=bv_nrm_idx,  # type: ignore
                     component_type=FLOAT,
                     count=vcount,
                     type_str="VEC3",
@@ -395,7 +395,7 @@ def gltf_like_to_glb(
             prim_out = GLTFPrimitive()
             prim_out.attributes.POSITION = acc_pos_idx
             if has_normals:
-                prim_out.attributes.NORMAL = acc_nrm_idx
+                prim_out.attributes.NORMAL = acc_nrm_idx  # type: ignore
             prim_out.indices = acc_idx_idx
             prim_out.mode = 4  # TRIANGLES
             if material_idx is not None:
