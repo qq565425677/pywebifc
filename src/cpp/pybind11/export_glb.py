@@ -8,20 +8,17 @@ Pipeline:
   - pack into a valid GLB (glTF 2.0) without external deps
 
 Usage:
-  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8]
-  python pybind11/export_glb.py input.ifc output.glb [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8]
+  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
+  python pybind11/export_glb.py input.ifc output.glb [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
 
 Notes:
   - By default exports POSITION + INDICES. Use --normals to also export NORMALs
     if present in the glTF-like input. (No UVs.)
-  - Each primitive becomes TRIANGLES with uint32 indices.
+  - Each primitive becomes TRIANGLES with uint16/uint32 indices.
   - Materials map to pbrMetallicRoughness(baseColorFactor). If
     --metallicFactor/--roughnessFactor are provided, they are written to GLB;
     otherwise these fields are omitted (glTF defaults apply).
 """
-
-from __future__ import annotations
-
 import argparse
 import json
 import math
@@ -32,12 +29,99 @@ from pathlib import Path
 import sys
 import traceback
 import numpy as np
+import logging
+from pygltflib import (
+    GLTF2,
+    Scene as GLTFScene,
+    Node as GLTFNode,
+    Mesh as GLTFMesh,
+    Primitive as GLTFPrimitive,
+    Buffer as GLTFBuffer,
+    BufferView as GLTFBufferView,
+    Accessor as GLTFAccessor,
+    Asset as GLTFAsset,
+    PbrMetallicRoughness as GLTFPBR,
+    Material as GLTFMaterial,
+    ARRAY_BUFFER,
+    ELEMENT_ARRAY_BUFFER,
+    FLOAT,
+    UNSIGNED_SHORT,
+    UNSIGNED_INT,
+)
 
 here = Path(__file__).resolve().parent
 
+COMPONENT_TYPE_DTYPES = {
+    FLOAT: np.float32,
+    UNSIGNED_SHORT: np.uint16,
+    UNSIGNED_INT: np.uint32,
+}
 
-def _align4(n: int) -> int:
-    return (n + 3) & ~3
+TYPE_NUM_COMPONENTS = {
+    "SCALAR": 1,
+    "VEC2": 2,
+    "VEC3": 3,
+    "VEC4": 4,
+    "MAT4": 16,
+}
+
+
+class BinBuilder:
+    """Builds a single GLB binary buffer with 4-byte alignment and tracks
+    bufferViews/accessors. Keeps JSON-free to avoid external deps.
+
+    Usage:
+      - add_view(data: bytes, target: Optional[int]) -> int (bufferView index)
+      - add_accessor(...) -> int (accessor index)
+      - blob, buffer_views, accessors attributes are used to assemble GLB
+    """
+
+    def __init__(self) -> None:
+        self.blob = bytearray()
+        self.buffer_views: List[Any] = []  # Dict or GLTFBufferView
+        self.accessors: List[Any] = []  # Dict or GLTFAccessor
+
+    def _align4(self):
+        pad = (-len(self.blob)) % 4
+        if pad:
+            self.blob.extend(b"\x00" * pad)
+
+    def add_view(self, data_bytes: bytes, target: Optional[int]) -> int:
+        self._align4()
+        byte_offset = len(self.blob)
+        self.blob.extend(data_bytes)
+        bv = GLTFBufferView(
+            buffer=0,
+            byteOffset=byte_offset,
+            byteLength=len(data_bytes),
+            target=target,
+        )
+        self.buffer_views.append(bv)
+        return len(self.buffer_views) - 1
+
+    def add_accessor(
+        self,
+        buffer_view: int,
+        component_type: int,
+        count: int,
+        type_str: str,
+        byte_offset: int = 0,
+        minv: Optional[List[float]] = None,
+        maxv: Optional[List[float]] = None,
+    ) -> int:
+        acc = GLTFAccessor(
+            bufferView=buffer_view,
+            byteOffset=byte_offset,
+            componentType=component_type,
+            count=int(count),
+            type=type_str,
+        )
+        if minv is not None:
+            acc.min = minv
+        if maxv is not None:
+            acc.max = maxv
+        self.accessors.append(acc)
+        return len(self.accessors) - 1
 
 
 def _ensure_float32_xyz(x: Any) -> Tuple[np.ndarray, int]:
@@ -76,174 +160,128 @@ def gltf_like_to_glb(
     include_normals: bool = False,
     metallic_factor: Optional[float] = None,
     roughness_factor: Optional[float] = None,
+    warn_empty: bool = False,
 ) -> None:
-    # Set up base glTF document
-    gltf: Dict[str, Any] = {
-        "asset": {"version": "2.0", "generator": "pywebifc-export-glb"},
-        "scene": 0,
-        "scenes": [],
-        "nodes": [],
-        "meshes": [],
-        "materials": [],
-        "buffers": [],
-        "bufferViews": [],
-        "accessors": [],
-    }
 
-    # Copy scenes and nodes from input (caller may replace with hierarchical ones)
-    gltf["nodes"] = g.get("nodes", [])
-    gltf["scenes"] = g.get("scenes", [])
+    gltf = GLTF2(
+        scene=0,
+        scenes=g["scenes"],
+    )
 
-    # Materials: map to pbrMetallicRoughness
-    materials_out: List[Dict[str, Any]] = []
-    for m in g.get("materials", []):
-        base = m.get("baseColorFactor", [1.0, 1.0, 1.0, 1.0])
-        pbr: Dict[str, Any] = {"baseColorFactor": base}
+    # Materials
+    materials_in = g.get("materials", [])
+    materials_out: List[GLTFMaterial] = []
+    for m in materials_in:
+        base = m.get("baseColorFactor", [0.78, 0.78, 0.78, 1.0])
+        pbr = GLTFPBR(baseColorFactor=base)
         if metallic_factor is not None:
-            pbr["metallicFactor"] = float(metallic_factor)
+            pbr.metallicFactor = float(metallic_factor)
         if roughness_factor is not None:
-            pbr["roughnessFactor"] = float(roughness_factor)
-        materials_out.append({"pbrMetallicRoughness": pbr})
-    gltf["materials"] = materials_out
+            pbr.roughnessFactor = float(roughness_factor)
+        materials_out.append(GLTFMaterial(pbrMetallicRoughness=pbr))
+    gltf.materials = materials_out
 
-    # Build a single binary buffer; append per-primitive blocks
-    bin_blob = bytearray()
-    accessors: List[Dict[str, Any]] = []
-    buffer_views: List[Dict[str, Any]] = []
-
-    def add_block(data_bytes: bytes, target: Optional[int]) -> tuple[int, int]:
-        # returns (bufferViewIndex, accessorByteOffset)
-        byte_offset = len(bin_blob)
-        bin_blob.extend(data_bytes)
-        # 4-byte align buffer after each block
-        pad_len = _align4(len(bin_blob)) - len(bin_blob)
-        if pad_len:
-            bin_blob.extend(b"\x00" * pad_len)
-        bv = {
-            "buffer": 0,
-            "byteOffset": byte_offset,
-            "byteLength": len(data_bytes),
-        }
-        if target is not None:
-            bv["target"] = target
-        buffer_views.append(bv)
-        return len(buffer_views) - 1, byte_offset
-
-    meshes_out: List[Dict[str, Any]] = []
-    for mesh in g.get("meshes", []):
-        prims_out: List[Dict[str, Any]] = []
-        for prim in mesh.get("primitives", []):
+    # Build a single binary buffer via BinBuilder
+    binb = BinBuilder()
+    gltf_meshes: List[GLTFMesh] = []
+    for mesh_idx, mesh in enumerate(g.get("meshes", [])):
+        prims_out: List[GLTFPrimitive] = []
+        for prim_idx, prim in enumerate(mesh.get("primitives", [])):
             points = prim.get("points", None)
             normals = prim.get("normals", None)
             faces = prim.get("faces", None)
             material_idx = prim.get("material")
-
             # Convert to NumPy arrays
             pos_f32, vcount = _ensure_float32_xyz(points)
             idx_u32 = _ensure_uint32_indices(faces)
             if vcount == 0 or idx_u32.size == 0:
+                if warn_empty:
+                    logging.warning(
+                        f"Empty primitive skipped (mesh {mesh_idx}, prim {prim_idx})"
+                    )
                 continue
-
             # Pack positions (float32)
-            bv_pos_idx, bv_pos_off = add_block(
-                pos_f32.tobytes(order="C"), 34962
-            )  # ARRAY_BUFFER
-
+            bv_pos_idx = binb.add_view(pos_f32.tobytes(order="C"), ARRAY_BUFFER)
             # Pack normals (float32) if requested and length matches
             has_normals = False
             if include_normals and normals is not None:
                 nrm_f32, ncount = _ensure_float32_xyz(normals)
                 has_normals = ncount == vcount
+                if not has_normals and warn_empty:
+                    logging.warning(
+                        f"NORMAL count mismatch; ignoring normals (mesh {mesh_idx}, prim {prim_idx})"
+                    )
                 if has_normals:
-                    bv_nrm_idx, _ = add_block(nrm_f32.tobytes(order="C"), 34962)
+                    bv_nrm_idx = binb.add_view(nrm_f32.tobytes(order="C"), ARRAY_BUFFER)
+            # Pick smallest index component type and pack indices
+            idx_comp_type = UNSIGNED_INT
+            idx_arr = idx_u32
+            if idx_u32.size:
+                max_idx = int(idx_u32.max())
+                if max_idx <= 65535:
+                    idx_comp_type = UNSIGNED_SHORT
+                    idx_arr = idx_u32.astype(np.uint16, copy=False)
 
-            # Pack indices (uint32)
-            bv_idx_idx, bv_idx_off = add_block(
-                idx_u32.tobytes(order="C"), 34963
-            )  # ELEMENT_ARRAY_BUFFER
+            bv_idx_idx = binb.add_view(idx_arr.tobytes(order="C"), ELEMENT_ARRAY_BUFFER)
 
             # Accessors
             pos_reshaped = pos_f32.reshape((-1, 3))
             mn = pos_reshaped.min(axis=0).astype(np.float32).tolist()
             mx = pos_reshaped.max(axis=0).astype(np.float32).tolist()
-
-            acc_pos = {
-                "bufferView": bv_pos_idx,
-                "byteOffset": 0,
-                "componentType": 5126,  # FLOAT
-                "count": vcount,
-                "type": "VEC3",
-                "min": mn,
-                "max": mx,
-            }
-            acc_idx = {
-                "bufferView": bv_idx_idx,
-                "byteOffset": 0,
-                "componentType": 5125,  # UNSIGNED_INT
-                "count": int(idx_u32.size),
-                "type": "SCALAR",
-            }
-            acc_pos_idx = len(accessors)
-            accessors.append(acc_pos)
+            acc_pos_idx = binb.add_accessor(
+                buffer_view=bv_pos_idx,
+                component_type=FLOAT,
+                count=vcount,
+                type_str="VEC3",
+                minv=mn,
+                maxv=mx,
+            )
             if has_normals:
-                acc_nrm = {
-                    "bufferView": bv_nrm_idx,
-                    "byteOffset": 0,
-                    "componentType": 5126,  # FLOAT
-                    "count": vcount,
-                    "type": "VEC3",
-                }
-                acc_nrm_idx = len(accessors)
-                accessors.append(acc_nrm)
+                acc_nrm_idx = binb.add_accessor(
+                    buffer_view=bv_nrm_idx,
+                    component_type=FLOAT,
+                    count=vcount,
+                    type_str="VEC3",
+                )
+            acc_idx_idx = binb.add_accessor(
+                buffer_view=bv_idx_idx,
+                component_type=idx_comp_type,
+                count=idx_arr.size,
+                type_str="SCALAR",
+            )
 
-            acc_idx_idx = len(accessors)
-            accessors.append(acc_idx)
-
-            prim_out = {
-                "attributes": {"POSITION": acc_pos_idx},
-                "indices": acc_idx_idx,
-                "mode": 4,  # TRIANGLES
-            }
+            prim_out = GLTFPrimitive()
+            prim_out.attributes.POSITION = acc_pos_idx
             if has_normals:
-                prim_out["attributes"]["NORMAL"] = acc_nrm_idx
+                prim_out.attributes.NORMAL = acc_nrm_idx
+            prim_out.indices = acc_idx_idx
+            prim_out.mode = 4  # TRIANGLES
             if material_idx is not None:
-                prim_out["material"] = int(material_idx)
-
+                prim_out.material = int(material_idx)
             prims_out.append(prim_out)
-
         if prims_out:
-            meshes_out.append({"primitives": prims_out})
-
-    gltf["meshes"] = meshes_out
-    # Update node.mesh indices are already matching gltf["meshes"] order
-    # because we preserved the order in build_gltf_like.
-
-    gltf["buffers"].append({"byteLength": len(bin_blob)})
-    gltf["bufferViews"] = buffer_views
-    gltf["accessors"] = accessors
-
-    # Create GLB
-    json_bytes = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
-    # pad JSON to 4-byte alignment with spaces
-    json_pad = _align4(len(json_bytes)) - len(json_bytes)
-    if json_pad:
-        json_bytes += b" " * json_pad
-
-    # GLB header
-    # magic 'glTF' (0x46546C67), version 2, total length after composing
-    def _chunk(chunk_type: bytes, payload: bytes) -> bytes:
-        return struct.pack("<I", len(payload)) + chunk_type + payload
-
-    json_chunk = _chunk(b"JSON", json_bytes)
-    bin_chunk = _chunk(b"BIN\x00", bytes(bin_blob)) if bin_blob else b""
-    total_len = 12 + len(json_chunk) + len(bin_chunk)
-    header = struct.pack("<III", 0x46546C67, 2, total_len)
-
-    with open(out_path, "wb") as f:
-        f.write(header)
-        f.write(json_chunk)
-        if bin_chunk:
-            f.write(bin_chunk)
+            gltf_meshes.append(GLTFMesh(primitives=prims_out))
+        elif warn_empty:
+            logging.warning(f"Mesh {mesh_idx} has no valid primitives")
+    gltf.meshes = gltf_meshes
+    # Nodes and Scenes
+    gltf.nodes = [
+        GLTFNode(
+            name=n.get("name", None),
+            mesh=n.get("mesh", None),
+            matrix=n.get("matrix", None),
+            children=n.get("children", None),
+            extras=n.get("extras", None),
+        )
+        for n in g.get("nodes", [])
+    ]
+    gltf.scenes = [GLTFScene(nodes=s.get("nodes", [])) for s in g.get("scenes", [])]
+    gltf.buffers = [GLTFBuffer(byteLength=len(binb.blob))]
+    gltf.bufferViews = binb.buffer_views
+    gltf.accessors = binb.accessors
+    # Attach binary and save
+    gltf.set_binary_blob(bytes(binb.blob))
+    gltf.save(out_path)
 
 
 def build_hierarchical_nodes(
@@ -369,12 +407,26 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=None,
         help="Optional roughnessFactor (0..1). If omitted, not written",
     )
+    ap.add_argument(
+        "--warnEmpty",
+        action="store_true",
+        help="Log warnings when primitives are empty or normals mismatch",
+    )
     args = ap.parse_args(argv)
 
     w = import_pywebifc()
 
     mid = w.open_model(args.ifc)
     try:
+        # Optional logging setup for warnings
+        if args.warnEmpty:
+            import logging as _logging
+
+            if not _logging.getLogger().handlers:
+                _logging.basicConfig(
+                    level=_logging.WARNING, format="%(levelname)s: %(message)s"
+                )
+
         data = w.build_gltf_like(mid, args.types)
         # Build IFC spatial hierarchy and assemble hierarchical nodes in Python
         hierarchy = w.build_spatial_hierarchy(mid)
@@ -390,6 +442,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             include_normals=args.normals,
             metallic_factor=args.metallicFactor,
             roughness_factor=args.roughnessFactor,
+            warn_empty=args.warnEmpty,
         )
     finally:
         w.close_model(mid)
