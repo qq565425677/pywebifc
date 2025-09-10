@@ -8,13 +8,15 @@ Pipeline:
   - pack into a valid GLB (glTF 2.0) without external deps
 
 Usage:
-  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
-  python pybind11/export_glb.py input.ifc output.glb [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
+  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
+  python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty]
 
 Notes:
   - By default exports POSITION + INDICES. Use --normals to also export NORMALs
     if present in the glTF-like input. (No UVs.)
   - Each primitive becomes TRIANGLES with uint16/uint32 indices.
+  - --winding can flip triangle index order (CW<->CCW). Default 'auto' attempts
+    a quick orientation check (signed volume estimate) and flips if negative.
   - Materials map to pbrMetallicRoughness(baseColorFactor). If
     --metallicFactor/--roughnessFactor are provided, they are written to GLB;
     otherwise these fields are omitted (glTF defaults apply).
@@ -150,10 +152,59 @@ def _ensure_uint32_indices(x: Any) -> np.ndarray:
     return np.ascontiguousarray(arr, dtype=np.uint32).reshape(-1)
 
 
+def _estimate_orientation_signed_volume(
+    pos_f32_flat: np.ndarray,
+    idx_u32: np.ndarray,
+    max_tris: int = 2000,
+    random_state: int = 0,
+) -> float:
+    """Estimate mesh orientation via signed volume (sum over tetrahedra).
+
+    Returns a signed value proportional to volume; negative often indicates CW winding
+    relative to the origin. Uses up to `max_tris` triangles for speed (random sampling).
+
+    Args:
+        pos_f32_flat: Flat (N*3,) float32 vertex array.
+        idx_u32: Flat (M*3,) uint32 index array.
+        max_tris: Maximum number of triangles to sample.
+        random_state: Optional seed for reproducible random sampling.
+    """
+    if pos_f32_flat.size == 0 or idx_u32.size < 3:
+        return 0.0
+
+    tri = idx_u32.reshape(-1, 3)
+    n_tris = len(tri)
+
+    if n_tris > max_tris:
+        # 随机抽样 max_tris 个三角形
+        rng = np.random.default_rng(random_state)
+        choice = rng.choice(n_tris, size=max_tris, replace=False)
+        tri = tri[choice]
+
+    # Gather positions; compute v0 · (v1 × v2)
+    p = pos_f32_flat.reshape(-1, 3).astype(np.float64, copy=False)
+    v0 = p[tri[:, 0]]
+    v1 = p[tri[:, 1]]
+    v2 = p[tri[:, 2]]
+
+    cross = np.cross(v1, v2)
+    signed = float(np.einsum("ij,ij->i", v0, cross).sum())
+    return signed
+
+
+def _flip_winding_u32(idx_u32: np.ndarray) -> np.ndarray:
+    if idx_u32.size == 0:
+        return idx_u32
+    tri = idx_u32.reshape(-1, 3).copy()
+    tri[:, [1, 2]] = tri[:, [2, 1]]
+    return tri.reshape(-1)
+
+
 def gltf_like_to_glb(
     g: Dict[str, Any],
     out_path: str,
     include_normals: bool = False,
+    winding: str = "auto",  # as-is | flip | auto (default: auto)
     metallic_factor: Optional[float] = None,
     roughness_factor: Optional[float] = None,
     warn_empty: bool = False,
@@ -196,6 +247,15 @@ def gltf_like_to_glb(
                         f"Empty primitive skipped (mesh {mesh_idx}, prim {prim_idx})"
                     )
                 continue
+            # Decide whether to flip winding
+            do_flip = False
+            if winding == "flip":
+                do_flip = True
+            elif winding == "auto":
+                signed = _estimate_orientation_signed_volume(pos_f32, idx_u32)
+                do_flip = signed < 0.0
+            if do_flip:
+                idx_u32 = _flip_winding_u32(idx_u32)
             # Pack positions (float32)
             bv_pos_idx = binb.add_view(pos_f32.tobytes(order="C"), ARRAY_BUFFER)
             # Pack normals (float32) if requested and length matches
@@ -208,6 +268,9 @@ def gltf_like_to_glb(
                         f"NORMAL count mismatch; ignoring normals (mesh {mesh_idx}, prim {prim_idx})"
                     )
                 if has_normals:
+                    # If we flipped winding, also invert normals to keep lighting consistent
+                    if do_flip:
+                        nrm_f32 = (-nrm_f32).astype(np.float32, copy=False)
                     bv_nrm_idx = binb.add_view(nrm_f32.tobytes(order="C"), ARRAY_BUFFER)
             # Pick smallest index component type and pack indices
             idx_comp_type = UNSIGNED_INT
@@ -394,6 +457,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Include NORMAL attribute in GLB if available",
     )
     ap.add_argument(
+        "--winding",
+        choices=["as-is", "flip", "auto"],
+        default="auto",
+        help="Triangle winding: keep as-is, force flip, or auto-detect (default)",
+    )
+    ap.add_argument(
         "--metallicFactor",
         type=float,
         default=None,
@@ -438,6 +507,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             data,
             args.out,
             include_normals=args.normals,
+            winding=args.winding,
             metallic_factor=args.metallicFactor,
             roughness_factor=args.roughnessFactor,
             warn_empty=args.warnEmpty,
