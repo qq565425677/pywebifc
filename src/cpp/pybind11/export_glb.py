@@ -27,10 +27,11 @@ import json
 import math
 import os
 import struct
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 import sys
 import traceback
+import numpy as np
 
 here = Path(__file__).resolve().parent
 
@@ -39,26 +40,34 @@ def _align4(n: int) -> int:
     return (n + 3) & ~3
 
 
-def _minmax3(flat_xyz: List[float]) -> List[List[float]]:
-    if not flat_xyz:
-        return [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-    mn = [math.inf, math.inf, math.inf]
-    mx = [-math.inf, -math.inf, -math.inf]
-    for i in range(0, len(flat_xyz), 3):
-        x, y, z = flat_xyz[i], flat_xyz[i + 1], flat_xyz[i + 2]
-        if x < mn[0]:
-            mn[0] = x
-        if y < mn[1]:
-            mn[1] = y
-        if z < mn[2]:
-            mn[2] = z
-        if x > mx[0]:
-            mx[0] = x
-        if y > mx[1]:
-            mx[1] = y
-        if z > mx[2]:
-            mx[2] = z
-    return [mn, mx]
+def _ensure_float32_xyz(x: Any) -> Tuple[np.ndarray, int]:
+    """Return (flat_float32, vertex_count).
+
+    Accepts list/tuple or numpy arrays with shape (N,3) or (3N,).
+    Produces a contiguous float32 1D array of length 3N.
+    """
+    if x is None:
+        return np.empty((0,), dtype=np.float32), 0
+    arr = np.asarray(x)
+    if arr.size == 0:
+        return np.empty((0,), dtype=np.float32), 0
+    if arr.ndim == 2 and arr.shape[1] == 3:
+        vcount = int(arr.shape[0])
+        flat = np.ascontiguousarray(arr, dtype=np.float32).reshape(-1)
+        return flat, vcount
+    flat = np.ascontiguousarray(arr, dtype=np.float32).reshape(-1)
+    if flat.size % 3 != 0:
+        raise ValueError("POSITION/NORMAL array length must be multiple of 3")
+    return flat, flat.size // 3
+
+
+def _ensure_uint32_indices(x: Any) -> np.ndarray:
+    if x is None:
+        return np.empty((0,), dtype=np.uint32)
+    arr = np.asarray(x)
+    if arr.size == 0:
+        return np.empty((0,), dtype=np.uint32)
+    return np.ascontiguousarray(arr, dtype=np.uint32).reshape(-1)
 
 
 def gltf_like_to_glb(
@@ -124,43 +133,39 @@ def gltf_like_to_glb(
     for mesh in g.get("meshes", []):
         prims_out: List[Dict[str, Any]] = []
         for prim in mesh.get("primitives", []):
-            points = prim.get("points", [])
-            normals = prim.get("normals", [])
-            faces = prim.get("faces", [])
+            points = prim.get("points", None)
+            normals = prim.get("normals", None)
+            faces = prim.get("faces", None)
             material_idx = prim.get("material")
 
-            if not points or not faces:
+            # Convert to NumPy arrays
+            pos_f32, vcount = _ensure_float32_xyz(points)
+            idx_u32 = _ensure_uint32_indices(faces)
+            if vcount == 0 or idx_u32.size == 0:
                 continue
 
             # Pack positions (float32)
-            pos_bytes = bytearray()
-            for v in points:
-                pos_bytes.extend(struct.pack("<f", float(v)))
-            bv_pos_idx, bv_pos_off = add_block(bytes(pos_bytes), 34962)  # ARRAY_BUFFER
+            bv_pos_idx, bv_pos_off = add_block(
+                pos_f32.tobytes(order="C"), 34962
+            )  # ARRAY_BUFFER
 
             # Pack normals (float32) if requested and length matches
-            has_normals = (
-                include_normals
-                and isinstance(normals, list)
-                and len(normals) == len(points)
-            )
-            if has_normals:
-                nrm_bytes = bytearray()
-                for v in normals:
-                    nrm_bytes.extend(struct.pack("<f", float(v)))
-                bv_nrm_idx, _ = add_block(bytes(nrm_bytes), 34962)
+            has_normals = False
+            if include_normals and normals is not None:
+                nrm_f32, ncount = _ensure_float32_xyz(normals)
+                has_normals = ncount == vcount
+                if has_normals:
+                    bv_nrm_idx, _ = add_block(nrm_f32.tobytes(order="C"), 34962)
 
             # Pack indices (uint32)
-            idx_bytes = bytearray()
-            for i in faces:
-                idx_bytes.extend(struct.pack("<I", int(i)))
             bv_idx_idx, bv_idx_off = add_block(
-                bytes(idx_bytes), 34963
+                idx_u32.tobytes(order="C"), 34963
             )  # ELEMENT_ARRAY_BUFFER
 
             # Accessors
-            vcount = len(points) // 3
-            mn, mx = _minmax3(points)
+            pos_reshaped = pos_f32.reshape((-1, 3))
+            mn = pos_reshaped.min(axis=0).astype(np.float32).tolist()
+            mx = pos_reshaped.max(axis=0).astype(np.float32).tolist()
 
             acc_pos = {
                 "bufferView": bv_pos_idx,
@@ -175,7 +180,7 @@ def gltf_like_to_glb(
                 "bufferView": bv_idx_idx,
                 "byteOffset": 0,
                 "componentType": 5125,  # UNSIGNED_INT
-                "count": len(faces),
+                "count": int(idx_u32.size),
                 "type": "SCALAR",
             }
             acc_pos_idx = len(accessors)
@@ -376,16 +381,18 @@ def main(argv: Optional[List[str]] = None) -> None:
         assembled = build_hierarchical_nodes(data, hierarchy)
         data["nodes"] = assembled["nodes"]
         data["scenes"] = assembled["scenes"]
+
+        # Important: build_gltf_like now returns NumPy views on C++ memory.
+        # Close the model only after binary packing is done.
+        gltf_like_to_glb(
+            data,
+            args.out,
+            include_normals=args.normals,
+            metallic_factor=args.metallicFactor,
+            roughness_factor=args.roughnessFactor,
+        )
     finally:
         w.close_model(mid)
-
-    gltf_like_to_glb(
-        data,
-        args.out,
-        include_normals=args.normals,
-        metallic_factor=args.metallicFactor,
-        roughness_factor=args.roughnessFactor,
-    )
     print(f"Wrote GLB: {args.out}")
 
 
