@@ -8,14 +8,16 @@ Pipeline:
   - pack into a valid GLB (glTF 2.0) without external deps
 
 Usage:
-  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals]
-  python pybind11/export_glb.py input.ifc output.glb [--normals]
+  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8]
+  python pybind11/export_glb.py input.ifc output.glb [--normals] [--metallicFactor 0.5] [--roughnessFactor 0.8]
 
 Notes:
   - By default exports POSITION + INDICES. Use --normals to also export NORMALs
     if present in the glTF-like input. (No UVs.)
   - Each primitive becomes TRIANGLES with uint32 indices.
-  - Materials map to pbrMetallicRoughness(baseColorFactor) with metallicFactor=0.5, roughnessFactor=0.8.
+  - Materials map to pbrMetallicRoughness(baseColorFactor). If
+    --metallicFactor/--roughnessFactor are provided, they are written to GLB;
+    otherwise these fields are omitted (glTF defaults apply).
 """
 
 from __future__ import annotations
@@ -60,7 +62,11 @@ def _minmax3(flat_xyz: List[float]) -> List[List[float]]:
 
 
 def gltf_like_to_glb(
-    g: Dict[str, Any], out_path: str, include_normals: bool = False
+    g: Dict[str, Any],
+    out_path: str,
+    include_normals: bool = False,
+    metallic_factor: Optional[float] = None,
+    roughness_factor: Optional[float] = None,
 ) -> None:
     # Set up base glTF document
     gltf: Dict[str, Any] = {
@@ -83,15 +89,12 @@ def gltf_like_to_glb(
     materials_out: List[Dict[str, Any]] = []
     for m in g.get("materials", []):
         base = m.get("baseColorFactor", [1.0, 1.0, 1.0, 1.0])
-        materials_out.append(
-            {
-                "pbrMetallicRoughness": {
-                    "baseColorFactor": base,
-                    "metallicFactor": 0.5,  # another default value can be 0.0
-                    "roughnessFactor": 0.8,  # another default value can be 1.0
-                }
-            }
-        )
+        pbr: Dict[str, Any] = {"baseColorFactor": base}
+        if metallic_factor is not None:
+            pbr["metallicFactor"] = float(metallic_factor)
+        if roughness_factor is not None:
+            pbr["roughnessFactor"] = float(roughness_factor)
+        materials_out.append({"pbrMetallicRoughness": pbr})
     gltf["materials"] = materials_out
 
     # Build a single binary buffer; append per-primitive blocks
@@ -349,6 +352,18 @@ def main(argv: Optional[List[str]] = None) -> None:
         action="store_true",
         help="Include NORMAL attribute in GLB if available",
     )
+    ap.add_argument(
+        "--metallicFactor",
+        type=float,
+        default=None,
+        help="Optional metallicFactor (0..1). If omitted, not written",
+    )
+    ap.add_argument(
+        "--roughnessFactor",
+        type=float,
+        default=None,
+        help="Optional roughnessFactor (0..1). If omitted, not written",
+    )
     args = ap.parse_args(argv)
 
     w = import_pywebifc()
@@ -364,7 +379,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     finally:
         w.close_model(mid)
 
-    gltf_like_to_glb(data, args.out, include_normals=args.normals)
+    gltf_like_to_glb(
+        data,
+        args.out,
+        include_normals=args.normals,
+        metallic_factor=args.metallicFactor,
+        roughness_factor=args.roughnessFactor,
+    )
     print(f"Wrote GLB: {args.out}")
 
 
