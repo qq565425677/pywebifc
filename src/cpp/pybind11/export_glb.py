@@ -322,7 +322,8 @@ def gltf_like_to_glb(
             # If not exporting normals and cleaning enabled, run a lightweight clean to deduplicate
             # vertices/faces and drop degenerates for each primitive mesh.
             if (not include_normals) and clean:
-                pos_f32, idx_u32 = _clean_mesh_numpy(pos_f32, idx_u32)
+                w = import_pywebifc()
+                pos_f32, idx_u32 = w.clean_mesh(pos_f32, idx_u32)
                 vcount = 0 if pos_f32.size == 0 else pos_f32.size // 3
                 if vcount == 0 or idx_u32.size == 0:
                     if warn_empty:

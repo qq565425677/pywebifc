@@ -9,6 +9,7 @@ implementation is in a compiled module built via pybind11.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+import numpy as np
 
 __version__: str
 
@@ -141,5 +142,28 @@ def build_spatial_hierarchy(model_id: int) -> Dict[str, Any]:
         }
     Children combine IfcRelAggregates (decomposition) and
     IfcRelContainedInSpatialStructure (spatial containment) edges.
+    """
+    ...
+
+def clean_mesh(pos_f32_flat: np.ndarray, idx_u32_flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Clean a triangle mesh by deduplicating vertices and faces using exact float matches.
+
+    Parameters
+    ----------
+    pos_f32_flat : numpy.ndarray (float32, shape=(3*N,) or (N,3))
+        Flat positions array.
+    idx_u32_flat : numpy.ndarray (uint32, shape=(3*M,) or (M,3))
+        Flat triangle index array.
+
+    Returns
+    -------
+    (numpy.ndarray, numpy.ndarray)
+        Tuple of (clean_pos_flat_float32, clean_idx_flat_uint32).
+
+    Notes
+    -----
+    Performs exact bitwise equality on float32 positions (no tolerance).
+    Removes degenerate and duplicate triangles (ignoring winding) and
+    compacts to only used vertices.
     """
     ...
