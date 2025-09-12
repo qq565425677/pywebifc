@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <optional>
 #include <unordered_set>
+#include <cstring>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -225,33 +226,44 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
         const auto &fv = geom.fvertexData; // interleaved [x y z nx ny nz] per vertex
         const auto &idx = geom.indexData;  // 3 per triangle
 
-        // Build NumPy arrays that view the underlying geometry buffers without copy.
-        // points/normals are 2D (numPoints, 3) with row stride equal to vertex format size.
-        const ssize_t item_stride = static_cast<ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS * sizeof(float));
+        // Build NumPy arrays with independent storage to avoid lifetime issues
+        // and inadvertent mutations from the C++ side. This copies data.
+        const ssize_t item_stride = static_cast<ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS);
 
-        // Positions view: start at +0 floats
-        py::array points = py::array(
-            py::dtype::of<float>(),
-            {static_cast<ssize_t>(geom.numPoints), static_cast<ssize_t>(3)},
-            {item_stride, static_cast<ssize_t>(sizeof(float))},
-            const_cast<float *>(fv.data()),
-            py::none());
+        // Positions copy
+        py::array_t<float> points({static_cast<ssize_t>(geom.numPoints), static_cast<ssize_t>(3)});
+        {
+            auto p = points.mutable_unchecked<2>();
+            const float *src = fv.data();
+            for (size_t i = 0; i < geom.numPoints; ++i)
+            {
+                const float *v = src + i * item_stride;
+                p(i, 0) = v[0];
+                p(i, 1) = v[1];
+                p(i, 2) = v[2];
+            }
+        }
 
-        // Normals view: start at +3 floats if available in the format
-        py::array normals = py::array(
-            py::dtype::of<float>(),
-            {static_cast<ssize_t>(geom.numPoints), static_cast<ssize_t>(3)},
-            {item_stride, static_cast<ssize_t>(sizeof(float))},
-            const_cast<float *>(fv.data() + 3),
-            py::none());
+        // Normals copy (offset +3 floats)
+        py::array_t<float> normals({static_cast<ssize_t>(geom.numPoints), static_cast<ssize_t>(3)});
+        {
+            auto n = normals.mutable_unchecked<2>();
+            const float *src = fv.data();
+            for (size_t i = 0; i < geom.numPoints; ++i)
+            {
+                const float *v = src + i * item_stride + 3;
+                n(i, 0) = v[0];
+                n(i, 1) = v[1];
+                n(i, 2) = v[2];
+            }
+        }
 
-        // Faces (triangle indices) — contiguous view over uint32_t vector
-        py::array faces = py::array(
-            py::dtype::of<uint32_t>(),
-            {static_cast<ssize_t>(idx.size())},
-            {static_cast<ssize_t>(sizeof(uint32_t))},
-            const_cast<uint32_t *>(idx.data()),
-            py::none());
+        // Faces copy
+        py::array_t<uint32_t> faces({static_cast<ssize_t>(idx.size())});
+        if (!idx.empty())
+        {
+            std::memcpy(faces.mutable_data(), idx.data(), idx.size() * sizeof(uint32_t));
+        }
 
         // Primitive
         py::dict prim;
