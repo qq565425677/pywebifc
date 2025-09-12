@@ -483,6 +483,194 @@ static py::dict BuildSpatialHierarchy(uint32_t modelID)
     return out;
 }
 
+// ---------------------------------------------------------------------
+// Mesh utilities: C++ implementation of clean_mesh exposed to Python
+// ---------------------------------------------------------------------
+static py::tuple CleanMesh(py::array pos_f32_flat, py::array idx_u32_flat)
+{
+    // Request buffers with expected dtypes and C layout
+    auto pos = py::array_t<float, py::array::c_style | py::array::forcecast>(pos_f32_flat);
+    auto idx = py::array_t<uint32_t, py::array::c_style | py::array::forcecast>(idx_u32_flat);
+
+    auto bpos = pos.request();
+    auto bidx = idx.request();
+
+    const size_t npos = static_cast<size_t>(bpos.size);
+    const size_t nidx = static_cast<size_t>(bidx.size);
+
+    if (npos == 0 || nidx == 0)
+    {
+        // Return copies to ensure ownership from Python side
+        auto out_pos = py::array_t<float>(npos);
+        auto out_idx = py::array_t<uint32_t>(nidx);
+        if (npos)
+            std::memcpy(out_pos.mutable_data(), bpos.ptr, npos * sizeof(float));
+        if (nidx)
+            std::memcpy(out_idx.mutable_data(), bidx.ptr, nidx * sizeof(uint32_t));
+        return py::make_tuple(out_pos, out_idx);
+    }
+
+    if (npos % 3 != 0)
+        throw std::runtime_error("pos_f32_flat length must be a multiple of 3");
+    if (nidx % 3 != 0)
+        throw std::runtime_error("idx_u32_flat length must be a multiple of 3");
+
+    const size_t num_vertices = npos / 3;
+    const size_t num_tris = nidx / 3;
+
+    const float *pos_ptr = static_cast<const float *>(bpos.ptr);
+    const uint32_t *idx_ptr = static_cast<const uint32_t *>(bidx.ptr);
+
+    // 1) Deduplicate vertices (exact float32 matches using bitwise equality)
+    struct Arr3U32Hash
+    {
+        size_t operator()(const std::array<uint32_t, 3> &a) const noexcept
+        {
+            // Simple mix of three 32-bit values
+            size_t h = static_cast<size_t>(a[0]) * 0x9E3779B185EBCA87ULL;
+            h ^= static_cast<size_t>(a[1]) + 0x9E3779B185EBCA87ULL + (h << 6) + (h >> 2);
+            h ^= static_cast<size_t>(a[2]) + 0x9E3779B185EBCA87ULL + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+
+    struct Arr3U32Eq
+    {
+        bool operator()(const std::array<uint32_t, 3> &a, const std::array<uint32_t, 3> &b) const noexcept
+        {
+            return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+        }
+    };
+
+    std::unordered_map<std::array<uint32_t, 3>, uint32_t, Arr3U32Hash, Arr3U32Eq> vert_map;
+    vert_map.reserve(num_vertices * 2 + 1);
+
+    std::vector<float> unique_pos;
+    unique_pos.reserve(npos);
+
+    std::vector<uint32_t> inverse(num_vertices);
+
+    for (size_t i = 0; i < num_vertices; ++i)
+    {
+        // Read 3 floats, reinterpret as 3 uint32_t (bitwise equality)
+        std::array<uint32_t, 3> key;
+        std::memcpy(&key[0], pos_ptr + 3 * i + 0, sizeof(uint32_t));
+        std::memcpy(&key[1], pos_ptr + 3 * i + 1, sizeof(uint32_t));
+        std::memcpy(&key[2], pos_ptr + 3 * i + 2, sizeof(uint32_t));
+
+        auto it = vert_map.find(key);
+        if (it == vert_map.end())
+        {
+            uint32_t new_idx = static_cast<uint32_t>(unique_pos.size() / 3);
+            vert_map.emplace(key, new_idx);
+            unique_pos.push_back(pos_ptr[3 * i + 0]);
+            unique_pos.push_back(pos_ptr[3 * i + 1]);
+            unique_pos.push_back(pos_ptr[3 * i + 2]);
+            inverse[i] = new_idx;
+        }
+        else
+        {
+            inverse[i] = it->second;
+        }
+    }
+
+    // 2) Remap indices into unique vertex space and drop degenerate triangles
+    std::vector<std::array<uint32_t, 3>> tris;
+    tris.reserve(num_tris);
+    for (size_t t = 0; t < num_tris; ++t)
+    {
+        uint32_t a = inverse[idx_ptr[3 * t + 0]];
+        uint32_t b = inverse[idx_ptr[3 * t + 1]];
+        uint32_t c = inverse[idx_ptr[3 * t + 2]];
+        if (a == b || b == c || a == c)
+            continue; // degenerate
+        tris.push_back({a, b, c});
+    }
+
+    if (tris.empty())
+    {
+        // Return compacted empty mesh with unique vertices (as Python did)
+        auto out_pos = py::array_t<float>(unique_pos.size());
+        if (!unique_pos.empty())
+            std::memcpy(out_pos.mutable_data(), unique_pos.data(), unique_pos.size() * sizeof(float));
+        auto out_idx = py::array_t<uint32_t>(0);
+        return py::make_tuple(out_pos, out_idx);
+    }
+
+    // 3) Remove duplicate faces ignoring winding by sorting indices within each tri
+    std::unordered_set<std::array<uint32_t, 3>, Arr3U32Hash, Arr3U32Eq> seen_faces;
+    seen_faces.reserve(tris.size() * 2 + 1);
+    std::vector<std::array<uint32_t, 3>> dedup_tris;
+    dedup_tris.reserve(tris.size());
+
+    for (auto &tri : tris)
+    {
+        std::array<uint32_t, 3> key = tri;
+        // sort ascending
+        if (key[0] > key[1]) std::swap(key[0], key[1]);
+        if (key[1] > key[2]) std::swap(key[1], key[2]);
+        if (key[0] > key[1]) std::swap(key[0], key[1]);
+        if (seen_faces.insert(key).second)
+        {
+            dedup_tris.push_back(tri); // keep original winding
+        }
+    }
+
+    // 4) Compact to only used vertices; follow Python behavior of sorted unique indices
+    std::vector<uint32_t> used;
+    used.reserve(unique_pos.size() / 3);
+    {
+        std::unordered_set<uint32_t> used_set;
+        used_set.reserve(dedup_tris.size() * 3);
+        for (auto &tri : dedup_tris)
+        {
+            used_set.insert(tri[0]);
+            used_set.insert(tri[1]);
+            used_set.insert(tri[2]);
+        }
+        used.assign(used_set.begin(), used_set.end());
+        std::sort(used.begin(), used.end());
+    }
+
+    // Build remap oldUnique -> compact [0..K)
+    std::vector<uint32_t> remap(unique_pos.size() / 3, UINT32_MAX);
+    for (uint32_t i = 0; i < static_cast<uint32_t>(used.size()); ++i)
+    {
+        remap[used[i]] = i;
+    }
+
+    // Remap triangles
+    std::vector<uint32_t> out_idx_vec;
+    out_idx_vec.reserve(dedup_tris.size() * 3);
+    for (auto &tri : dedup_tris)
+    {
+        out_idx_vec.push_back(remap[tri[0]]);
+        out_idx_vec.push_back(remap[tri[1]]);
+        out_idx_vec.push_back(remap[tri[2]]);
+    }
+
+    // Build compact positions
+    std::vector<float> out_pos_vec;
+    out_pos_vec.reserve(used.size() * 3);
+    for (auto u : used)
+    {
+        out_pos_vec.push_back(unique_pos[3 * u + 0]);
+        out_pos_vec.push_back(unique_pos[3 * u + 1]);
+        out_pos_vec.push_back(unique_pos[3 * u + 2]);
+    }
+
+    // Convert to NumPy arrays
+    py::array_t<float> out_pos(out_pos_vec.size());
+    if (!out_pos_vec.empty())
+        std::memcpy(out_pos.mutable_data(), out_pos_vec.data(), out_pos_vec.size() * sizeof(float));
+
+    py::array_t<uint32_t> out_idx(out_idx_vec.size());
+    if (!out_idx_vec.empty())
+        std::memcpy(out_idx.mutable_data(), out_idx_vec.data(), out_idx_vec.size() * sizeof(uint32_t));
+
+    return py::make_tuple(out_pos, out_idx);
+}
+
 PYBIND11_MODULE(pywebifc, m)
 {
     m.doc() = R"doc(
@@ -654,190 +842,7 @@ IfcRelContainedInSpatialStructure (spatial containment) edges.
     // Returns (clean_pos_flat_float32, clean_idx_flat_uint32)
     m.def(
         "clean_mesh",
-        [](py::array pos_f32_flat, py::array idx_u32_flat)
-        {
-            // Request buffers with expected dtypes and C layout
-            auto pos = py::array_t<float, py::array::c_style | py::array::forcecast>(pos_f32_flat);
-            auto idx = py::array_t<uint32_t, py::array::c_style | py::array::forcecast>(idx_u32_flat);
-
-            auto bpos = pos.request();
-            auto bidx = idx.request();
-
-            const size_t npos = static_cast<size_t>(bpos.size);
-            const size_t nidx = static_cast<size_t>(bidx.size);
-
-            if (npos == 0 || nidx == 0)
-            {
-                // Return copies to ensure ownership from Python side
-                auto out_pos = py::array_t<float>(npos);
-                auto out_idx = py::array_t<uint32_t>(nidx);
-                if (npos)
-                    std::memcpy(out_pos.mutable_data(), bpos.ptr, npos * sizeof(float));
-                if (nidx)
-                    std::memcpy(out_idx.mutable_data(), bidx.ptr, nidx * sizeof(uint32_t));
-                return py::make_tuple(out_pos, out_idx);
-            }
-
-            if (npos % 3 != 0)
-                throw std::runtime_error("pos_f32_flat length must be a multiple of 3");
-            if (nidx % 3 != 0)
-                throw std::runtime_error("idx_u32_flat length must be a multiple of 3");
-
-            const size_t num_vertices = npos / 3;
-            const size_t num_tris = nidx / 3;
-
-            const float *pos_ptr = static_cast<const float *>(bpos.ptr);
-            const uint32_t *idx_ptr = static_cast<const uint32_t *>(bidx.ptr);
-
-            // 1) Deduplicate vertices (exact float32 matches using bitwise equality)
-            struct Arr3U32Hash
-            {
-                size_t operator()(const std::array<uint32_t, 3> &a) const noexcept
-                {
-                    // Simple mix of three 32-bit values
-                    size_t h = static_cast<size_t>(a[0]) * 0x9E3779B185EBCA87ULL;
-                    h ^= static_cast<size_t>(a[1]) + 0x9E3779B185EBCA87ULL + (h << 6) + (h >> 2);
-                    h ^= static_cast<size_t>(a[2]) + 0x9E3779B185EBCA87ULL + (h << 6) + (h >> 2);
-                    return h;
-                }
-            };
-
-            struct Arr3U32Eq
-            {
-                bool operator()(const std::array<uint32_t, 3> &a, const std::array<uint32_t, 3> &b) const noexcept
-                {
-                    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
-                }
-            };
-
-            std::unordered_map<std::array<uint32_t, 3>, uint32_t, Arr3U32Hash, Arr3U32Eq> vert_map;
-            vert_map.reserve(num_vertices * 2 + 1);
-
-            std::vector<float> unique_pos;
-            unique_pos.reserve(npos);
-
-            std::vector<uint32_t> inverse(num_vertices);
-
-            for (size_t i = 0; i < num_vertices; ++i)
-            {
-                // Read 3 floats, reinterpret as 3 uint32_t (bitwise equality)
-                std::array<uint32_t, 3> key;
-                std::memcpy(&key[0], pos_ptr + 3 * i + 0, sizeof(uint32_t));
-                std::memcpy(&key[1], pos_ptr + 3 * i + 1, sizeof(uint32_t));
-                std::memcpy(&key[2], pos_ptr + 3 * i + 2, sizeof(uint32_t));
-
-                auto it = vert_map.find(key);
-                if (it == vert_map.end())
-                {
-                    uint32_t new_idx = static_cast<uint32_t>(unique_pos.size() / 3);
-                    vert_map.emplace(key, new_idx);
-                    unique_pos.push_back(pos_ptr[3 * i + 0]);
-                    unique_pos.push_back(pos_ptr[3 * i + 1]);
-                    unique_pos.push_back(pos_ptr[3 * i + 2]);
-                    inverse[i] = new_idx;
-                }
-                else
-                {
-                    inverse[i] = it->second;
-                }
-            }
-
-            // 2) Remap indices into unique vertex space and drop degenerate triangles
-            std::vector<std::array<uint32_t, 3>> tris;
-            tris.reserve(num_tris);
-            for (size_t t = 0; t < num_tris; ++t)
-            {
-                uint32_t a = inverse[idx_ptr[3 * t + 0]];
-                uint32_t b = inverse[idx_ptr[3 * t + 1]];
-                uint32_t c = inverse[idx_ptr[3 * t + 2]];
-                if (a == b || b == c || a == c)
-                    continue; // degenerate
-                tris.push_back({a, b, c});
-            }
-
-            if (tris.empty())
-            {
-                // Return compacted empty mesh with unique vertices (as Python did)
-                auto out_pos = py::array_t<float>(unique_pos.size());
-                if (!unique_pos.empty())
-                    std::memcpy(out_pos.mutable_data(), unique_pos.data(), unique_pos.size() * sizeof(float));
-                auto out_idx = py::array_t<uint32_t>(0);
-                return py::make_tuple(out_pos, out_idx);
-            }
-
-            // 3) Remove duplicate faces ignoring winding by sorting indices within each tri
-            std::unordered_set<std::array<uint32_t, 3>, Arr3U32Hash, Arr3U32Eq> seen_faces;
-            seen_faces.reserve(tris.size() * 2 + 1);
-            std::vector<std::array<uint32_t, 3>> dedup_tris;
-            dedup_tris.reserve(tris.size());
-
-            for (auto &tri : tris)
-            {
-                std::array<uint32_t, 3> key = tri;
-                // sort ascending
-                if (key[0] > key[1]) std::swap(key[0], key[1]);
-                if (key[1] > key[2]) std::swap(key[1], key[2]);
-                if (key[0] > key[1]) std::swap(key[0], key[1]);
-                if (seen_faces.insert(key).second)
-                {
-                    dedup_tris.push_back(tri); // keep original winding
-                }
-            }
-
-            // 4) Compact to only used vertices; follow Python behavior of sorted unique indices
-            std::vector<uint32_t> used;
-            used.reserve(unique_pos.size() / 3);
-            {
-                std::unordered_set<uint32_t> used_set;
-                used_set.reserve(dedup_tris.size() * 3);
-                for (auto &tri : dedup_tris)
-                {
-                    used_set.insert(tri[0]);
-                    used_set.insert(tri[1]);
-                    used_set.insert(tri[2]);
-                }
-                used.assign(used_set.begin(), used_set.end());
-                std::sort(used.begin(), used.end());
-            }
-
-            // Build remap oldUnique -> compact [0..K)
-            std::vector<uint32_t> remap(unique_pos.size() / 3, UINT32_MAX);
-            for (uint32_t i = 0; i < static_cast<uint32_t>(used.size()); ++i)
-            {
-                remap[used[i]] = i;
-            }
-
-            // Remap triangles
-            std::vector<uint32_t> out_idx_vec;
-            out_idx_vec.reserve(dedup_tris.size() * 3);
-            for (auto &tri : dedup_tris)
-            {
-                out_idx_vec.push_back(remap[tri[0]]);
-                out_idx_vec.push_back(remap[tri[1]]);
-                out_idx_vec.push_back(remap[tri[2]]);
-            }
-
-            // Build compact positions
-            std::vector<float> out_pos_vec;
-            out_pos_vec.reserve(used.size() * 3);
-            for (auto u : used)
-            {
-                out_pos_vec.push_back(unique_pos[3 * u + 0]);
-                out_pos_vec.push_back(unique_pos[3 * u + 1]);
-                out_pos_vec.push_back(unique_pos[3 * u + 2]);
-            }
-
-            // Convert to NumPy arrays
-            py::array_t<float> out_pos(out_pos_vec.size());
-            if (!out_pos_vec.empty())
-                std::memcpy(out_pos.mutable_data(), out_pos_vec.data(), out_pos_vec.size() * sizeof(float));
-
-            py::array_t<uint32_t> out_idx(out_idx_vec.size());
-            if (!out_idx_vec.empty())
-                std::memcpy(out_idx.mutable_data(), out_idx_vec.data(), out_idx_vec.size() * sizeof(uint32_t));
-
-            return py::make_tuple(out_pos, out_idx);
-        },
+        &CleanMesh,
         py::arg("pos_f32_flat"),
         py::arg("idx_u32_flat"),
         R"doc(

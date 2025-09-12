@@ -51,7 +51,33 @@ from pygltflib import (
     UNSIGNED_INT,
 )
 
-here = Path(__file__).resolve().parent
+
+def ensure_build_path_on_sys_path() -> None:
+    here = Path(__file__).resolve().parent
+    candidate = (here.parent / "build" / "pybind11").resolve()
+    print(f"Checking for built module in: {candidate}")
+    if candidate.exists() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+
+def import_pywebifc():
+    try:
+        import pywebifc  # type: ignore
+
+        return pywebifc
+    except Exception:
+        ensure_build_path_on_sys_path()
+        try:
+            import pywebifc  # type: ignore
+
+            return pywebifc
+        except Exception as e:
+            print("Failed to import pywebifc. Ensure the module is built.")
+            traceback.print_exc()
+            sys.exit(1)
+
+
+w = import_pywebifc()
 
 COMPONENT_TYPE_DTYPES = {
     FLOAT: np.float32,
@@ -159,7 +185,7 @@ def _ensure_uint32_indices(x: Any) -> np.ndarray:
 def _estimate_orientation_signed_volume(
     pos_f32_flat: np.ndarray,
     idx_u32: np.ndarray,
-    max_tris: int = 2000,
+    max_tris: int = 10000,
     random_state: int = 0,
 ) -> float:
     """Estimate mesh orientation via signed volume (sum over tetrahedra).
@@ -322,7 +348,6 @@ def gltf_like_to_glb(
             # If not exporting normals and cleaning enabled, run a lightweight clean to deduplicate
             # vertices/faces and drop degenerates for each primitive mesh.
             if (not include_normals) and clean:
-                w = import_pywebifc()
                 pos_f32, idx_u32 = w.clean_mesh(pos_f32, idx_u32)
                 vcount = 0 if pos_f32.size == 0 else pos_f32.size // 3
                 if vcount == 0 or idx_u32.size == 0:
@@ -500,30 +525,6 @@ def build_hierarchical_nodes(
     return {"nodes": nodes, "scenes": scenes}
 
 
-def ensure_build_path_on_sys_path() -> None:
-    candidate = (here.parent / "build" / "pybind11").resolve()
-    print(f"Checking for built module in: {candidate}")
-    if candidate.exists() and str(candidate) not in sys.path:
-        sys.path.insert(0, str(candidate))
-
-
-def import_pywebifc():
-    try:
-        import pywebifc  # type: ignore
-
-        return pywebifc
-    except Exception:
-        ensure_build_path_on_sys_path()
-        try:
-            import pywebifc  # type: ignore
-
-            return pywebifc
-        except Exception as e:
-            print("Failed to import pywebifc. Ensure the module is built.")
-            traceback.print_exc()
-            sys.exit(1)
-
-
 def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(description="Export IFC to GLB via pywebifc")
     ap.add_argument("ifc", help="Path to IFC file")
@@ -571,8 +572,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Disable per-primitive mesh clean when not exporting normals",
     )
     args = ap.parse_args(argv)
-
-    w = import_pywebifc()
 
     mid = w.open_model(args.ifc)
     try:
