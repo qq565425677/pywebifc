@@ -138,10 +138,11 @@ Add `--no-build-isolation` if you don't want to re-download all dependencies eve
 
 After installation you can:
 - Import in Python: `import pywebifc as w` and `from export_glb import gltf_like_to_glb`.
-- Use CLI: `pywebifc-export-glb input.ifc output.glb`. There are several optional arguments available to customize the GLB output. Use `pywebifc-export-glb -h` for details.
+- Use CLI: `pywebifc-export-glb input.ifc output.glb`.
 
 Editor hints / stubs
 - The wheel installs `pybind11/stubs/pywebifc.pyi` alongside the compiled module, so IDEs (VS Code/Pylance, PyCharm, mypy/pyright) show function signatures and docstrings on hover.
+- There are several optional arguments available to customize the GLB output. Use `pywebifc-export-glb -h` for details.
 
 ### Notes
 
