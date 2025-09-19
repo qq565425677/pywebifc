@@ -103,6 +103,38 @@ static std::string GetVersion()
     return std::string(WEB_IFC_VERSION_NUMBER);
 }
 
+// Set global log level for web-ifc (via ModelManager), using spdlog levels.
+// 0=trace,1=debug,2=info,3=warn,4=err,5=critical,6=off
+static void SetLogLevel(uint8_t level)
+{
+    // Ensure manager exists so SetLogLevel also sets pattern once
+    (void)manager();
+    g_manager->SetLogLevel(level);
+}
+
+static void SetLogLevelName(const std::string &name)
+{
+    std::string s;
+    s.resize(name.size());
+    std::transform(name.begin(), name.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    uint8_t lvl = 2; // default info
+    if (s == "trace")
+        lvl = 0;
+    else if (s == "debug")
+        lvl = 1;
+    else if (s == "info")
+        lvl = 2;
+    else if (s == "warn" || s == "warning")
+        lvl = 3;
+    else if (s == "err" || s == "error")
+        lvl = 4;
+    else if (s == "critical" || s == "crit")
+        lvl = 5;
+    else if (s == "off" || s == "none")
+        lvl = 6;
+    SetLogLevel(lvl);
+}
+
 // Convert a FlatMesh for a single element to a lightweight Python dict
 // with placement transforms and geometry references.
 static py::dict GetFlatMeshPy(uint32_t modelID, uint32_t expressID)
@@ -703,6 +735,27 @@ Notes
 -----
 Use together with other functions that accept a ``model_id``. Call
 ``close_model(model_id)`` when done to free resources.
+)doc");
+
+    // Logging controls
+    m.def(
+        "set_log_level",
+        &SetLogLevel,
+        py::arg("level"),
+        R"doc(Set web-ifc log level by numeric spdlog level.
+
+Levels
+------
+0=trace, 1=debug, 2=info, 3=warn, 4=err, 5=critical, 6=off
+)doc");
+
+    m.def(
+        "set_log_level_name",
+        &SetLogLevelName,
+        py::arg("name"),
+        R"doc(Set web-ifc log level by name.
+
+Accepted values: 'trace', 'debug', 'info', 'warn', 'error', 'critical', 'off'
 )doc");
 
     m.def(

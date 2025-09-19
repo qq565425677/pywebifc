@@ -24,6 +24,23 @@ def get_version() -> str:
     """
     ...
 
+# Logging controls -----------------------------------------------------------
+def set_log_level(level: int) -> None:
+    """Set web-ifc log level by numeric spdlog level.
+
+    Levels
+    ------
+    0=trace, 1=debug, 2=info, 3=warn, 4=err, 5=critical, 6=off
+    """
+    ...
+
+def set_log_level_name(name: str) -> None:
+    """Set web-ifc log level by name.
+
+    Accepted values: 'trace', 'debug', 'info', 'warn', 'error', 'critical', 'off'
+    """
+    ...
+
 def create_model() -> int:
     """Create an empty in-memory model and return its integer model ID.
 

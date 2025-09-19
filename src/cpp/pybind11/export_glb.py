@@ -79,6 +79,17 @@ def import_pywebifc():
 
 w = import_pywebifc()
 
+# Set default web-ifc log level to 'warn' to suppress startup info spam.
+# Users can override via --log-level. Best-effort: only if API exists.
+try:
+    if hasattr(w, "set_log_level_name"):
+        w.set_log_level_name("warn")
+    elif hasattr(w, "set_log_level"):
+        # spdlog: 0=trace,1=debug,2=info,3=warn,4=err,5=critical,6=off
+        w.set_log_level(3)
+except Exception:
+    pass
+
 COMPONENT_TYPE_DTYPES = {
     FLOAT: np.float32,
     UNSIGNED_SHORT: np.uint16,
@@ -530,6 +541,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("ifc", help="Path to IFC file")
     ap.add_argument("out", help="Output .glb path")
     ap.add_argument(
+        "--log-level",
+        choices=["trace", "debug", "info", "warn", "error", "critical", "off"],
+        default=None,
+        help="Set web-ifc log level (default: warn)",
+    )
+    ap.add_argument(
         "--types",
         type=int,
         nargs="*",
@@ -572,6 +589,25 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Disable per-primitive mesh clean when not exporting normals",
     )
     args = ap.parse_args(argv)
+
+    # Apply requested log level before opening model
+    if args.log_level:
+        try:
+            if hasattr(w, "set_log_level_name"):
+                w.set_log_level_name(args.log_level)
+            elif hasattr(w, "set_log_level"):
+                _map = {
+                    "trace": 0,
+                    "debug": 1,
+                    "info": 2,
+                    "warn": 3,
+                    "error": 4,
+                    "critical": 5,
+                    "off": 6,
+                }
+                w.set_log_level(_map[args.log_level])
+        except Exception:
+            pass
 
     mid = w.open_model(args.ifc)
     try:
