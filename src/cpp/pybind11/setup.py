@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from glob import glob
+from shutil import which
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -39,9 +40,11 @@ class CMakeBuild(build_ext):
             f"-DPython3_EXECUTABLE={sys.executable}",
         ]
 
-        # Prefer Ninja on non-Windows for faster builds if available
+        # Prefer Ninja on non-Windows only if it's available; otherwise let CMake choose
         if os.environ.get("CMAKE_GENERATOR") is None and sys.platform != "win32":
-            cmake_args += ["-G", "Ninja"]
+            ninja_exe = which("ninja") or which("ninja-build")
+            if ninja_exe:
+                cmake_args += ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja_exe}"]
 
         subprocess.check_call(["cmake", str(src_dir)] + cmake_args, cwd=str(build_dir))
 
