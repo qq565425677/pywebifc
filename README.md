@@ -111,3 +111,37 @@ Although the primary focus of the library is to be used through WebAssembly in t
 [npm]: https://img.shields.io/npm/v/web-ifc
 [npm-url]: https://www.npmjs.com/package/web-ifc
 [npm-downloads]: https://img.shields.io/npm/dw/web-ifc
+
+## Python (pybind11) Packaging
+
+- Location: Python packaging lives under `src/cpp/pybind11`.
+- What it provides:
+  - A compiled CPython extension `pywebifc` built via CMake/pybind11.
+  - A helper module `export_glb.py` exposing `gltf_like_to_glb` and a CLI.
+
+### Editable install (development)
+
+- macOS/Linux
+  - `cd src/cpp/pybind11`
+  - `python -m venv .venv && source .venv/bin/activate`
+  - `pip install -U pip setuptools wheel cmake ninja`
+  - `pip install -e .`
+
+- Windows (PowerShell)
+  - `cd src/cpp/pybind11`
+  - `python -m venv .venv; .\.venv\Scripts\Activate.ps1`
+  - `pip install -U pip setuptools wheel cmake`
+  - Install Visual Studio Build Tools (Desktop C++), then:
+  - `pip install -e .`
+
+After installation you can:
+- Import in Python: `import pywebifc as w` and `from export_glb import gltf_like_to_glb`.
+- Use CLI: `pywebifc-export-glb input.ifc output.glb --normals --winding auto`.
+
+Editor hints / stubs
+- The wheel installs `pybind11/stubs/pywebifc.pyi` alongside the compiled module, so IDEs (VS Code/Pylance, PyCharm, mypy/pyright) show function signatures and docstrings on hover.
+
+### Notes
+
+- The CMake for the Python extension is at `src/cpp/pybind11/CMakeLists.txt` and links the core library from `src/cpp`.
+- To avoid fetching pybind11 in CMake, install it in your Python env: `pip install pybind11`.

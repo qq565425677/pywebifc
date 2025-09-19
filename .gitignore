@@ -74,3 +74,8 @@ src/cpp/_deps/tinynurbs-src/
 # vscode
 src/cpp/.vscode/launch.json
 src/cpp/.vscode/settings.json
+
+# python
+__pycache__
+*.egg-info
+
