@@ -262,10 +262,10 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
 
         // Build NumPy arrays with independent storage to avoid lifetime issues
         // and inadvertent mutations from the C++ side. This copies data.
-        const ssize_t item_stride = static_cast<ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS);
+        const py::ssize_t item_stride = static_cast<py::ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS);
 
         // Positions copy
-        py::array_t<float> points({static_cast<ssize_t>(geom.numPoints), static_cast<ssize_t>(3)});
+        py::array_t<float> points({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
         {
             auto p = points.mutable_unchecked<2>();
             const float *src = fv.data();
@@ -279,7 +279,7 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
         }
 
         // Normals copy (offset +3 floats)
-        py::array_t<float> normals({static_cast<ssize_t>(geom.numPoints), static_cast<ssize_t>(3)});
+        py::array_t<float> normals({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
         {
             auto n = normals.mutable_unchecked<2>();
             const float *src = fv.data();
@@ -293,7 +293,7 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
         }
 
         // Faces copy
-        py::array_t<uint32_t> faces({static_cast<ssize_t>(idx.size())});
+        py::array_t<uint32_t> faces({static_cast<py::ssize_t>(idx.size())});
         if (!idx.empty())
         {
             std::memcpy(faces.mutable_data(), idx.data(), idx.size() * sizeof(uint32_t));
