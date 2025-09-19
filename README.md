@@ -134,6 +134,8 @@ Although the primary focus of the library is to be used through WebAssembly in t
   - Install Visual Studio Build Tools (Desktop C++), then:
   - `pip install -e .`
 
+Add `--no-build-isolation` if you don't want to re-download all dependencies every time you rebuild the extension, i.e., `pip install -e . --no-build-isolation`.
+
 After installation you can:
 - Import in Python: `import pywebifc as w` and `from export_glb import gltf_like_to_glb`.
 - Use CLI: `pywebifc-export-glb input.ifc output.glb --normals --winding auto`.
