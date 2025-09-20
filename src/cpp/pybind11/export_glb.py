@@ -31,6 +31,7 @@ from pathlib import Path
 import sys
 import traceback
 import numpy as np
+import time
 import logging
 from pygltflib import (
     GLTF2,
@@ -103,6 +104,26 @@ TYPE_NUM_COMPONENTS = {
     "VEC4": 4,
     "MAT4": 16,
 }
+
+
+class Timer:
+    def __init__(self, name=None, verbose=True):
+        self.name = name
+        self.verbose = verbose
+        self.start = 0.0
+        self.end = 0.0
+        self.elapsed = 0.0
+
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.end = time.perf_counter()
+        self.elapsed = self.end - self.start
+        if self.verbose:
+            label = f"{self.name}: " if self.name else ""
+            print(f"{label}{self.elapsed:.6f} 秒")
 
 
 class BinBuilder:
@@ -609,7 +630,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         except Exception:
             pass
 
-    mid = w.open_model(args.ifc)
+    with Timer("Open IFC"):
+        mid = w.open_model(args.ifc)
     try:
         # Optional logging setup for warnings
         if args.warnEmpty:
@@ -620,25 +642,29 @@ def main(argv: Optional[List[str]] = None) -> None:
                     level=_logging.WARNING, format="%(levelname)s: %(message)s"
                 )
 
-        data = w.build_gltf_like(mid, args.types)
+        with Timer("Build GLTF-like"):
+            data = w.build_gltf_like(mid, args.types)
         # Build IFC spatial hierarchy and assemble hierarchical nodes in Python
-        hierarchy = w.build_spatial_hierarchy(mid)
-        assembled = build_hierarchical_nodes(data, hierarchy)
+        with Timer("Build hierarchical nodes"):
+            hierarchy = w.build_spatial_hierarchy(mid)
+        with Timer("Assemble hierarchical nodes"):
+            assembled = build_hierarchical_nodes(data, hierarchy)
         data["nodes"] = assembled["nodes"]
         data["scenes"] = assembled["scenes"]
 
         # Important: build_gltf_like now returns NumPy views on C++ memory.
         # Close the model only after binary packing is done.
-        gltf_like_to_glb(
-            data,
-            args.out,
-            include_normals=args.normals,
-            winding=args.winding,
-            metallic_factor=args.metallicFactor,
-            roughness_factor=args.roughnessFactor,
-            warn_empty=args.warnEmpty,
-            clean=args.clean,
-        )
+        with Timer("Pack GLB"):
+            gltf_like_to_glb(
+                data,
+                args.out,
+                include_normals=args.normals,
+                winding=args.winding,
+                metallic_factor=args.metallicFactor,
+                roughness_factor=args.roughnessFactor,
+                warn_empty=args.warnEmpty,
+                clean=args.clean,
+            )
     finally:
         w.close_model(mid)
     print(f"Wrote GLB: {args.out}")
