@@ -289,7 +289,9 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
     py::list materials;        // material objects (simple baseColor only)
 
     // Dedup maps
-    std::unordered_map<uint32_t, uint32_t> geomIdToMeshIdx;  // geometryExpressID -> mesh index
+    // Deduplicate meshes by (geometryExpressID, materialIndex) so the same geometry
+    // with different materials becomes distinct meshes.
+    std::unordered_map<uint64_t, uint32_t> geomMatToMeshIdx; // (geom<<32)|mat -> mesh index
     std::unordered_map<std::string, uint32_t> colorToMatIdx; // "r,g,b,a" -> material index
 
     auto get_material_index = [&](const webifc::geometry::IfcPlacedGeometry &pg) -> uint32_t
@@ -320,8 +322,9 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
 
     auto ensure_mesh_for_geometry = [&](uint32_t geometryExpressID, uint32_t materialIndex) -> uint32_t
     {
-        auto it = geomIdToMeshIdx.find(geometryExpressID);
-        if (it != geomIdToMeshIdx.end())
+        uint64_t key = (static_cast<uint64_t>(geometryExpressID) << 32) | static_cast<uint64_t>(materialIndex);
+        auto it = geomMatToMeshIdx.find(key);
+        if (it != geomMatToMeshIdx.end())
             return it->second;
 
         // Prepare geometry data
@@ -384,7 +387,7 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
 
         uint32_t meshIdx = static_cast<uint32_t>(meshes.size());
         meshes.append(std::move(mesh));
-        geomIdToMeshIdx.emplace(geometryExpressID, meshIdx);
+        geomMatToMeshIdx.emplace(key, meshIdx);
         return meshIdx;
     };
 
