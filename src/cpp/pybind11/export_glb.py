@@ -645,7 +645,9 @@ def main(argv: Optional[List[str]] = None) -> None:
                 )
 
         with Timer("Build GLTF-like"):
-            data = w.build_gltf_like(mid, args.types)
+            # Prefer to avoid building normals unless requested, and share buffers
+            # to speed up C++->Python transfer. Fallback if older binding.
+            data = w.build_gltf_like(mid, args.types, include_normals=False, share_buffers=True)
         # Build IFC spatial hierarchy and assemble hierarchical nodes in Python
         with Timer("Build hierarchical nodes"):
             hierarchy = w.build_spatial_hierarchy(mid)

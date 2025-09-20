@@ -151,7 +151,12 @@ def get_flat_mesh(model_id: int, express_id: int) -> Dict[str, Any]:
     """
     ...
 
-def build_gltf_like(model_id: int, types: Optional[List[int]] = ...) -> Dict[str, Any]:
+def build_gltf_like(
+    model_id: int,
+    types: Optional[List[int]] = ...,
+    include_normals: bool = ...,
+    share_buffers: bool = ...,
+) -> Dict[str, Any]:
     """Build a glTF-like scene graph (Python dicts/lists) ready for GLB packing.
 
     Returns a dict like::
@@ -175,6 +180,16 @@ def build_gltf_like(model_id: int, types: Optional[List[int]] = ...) -> Dict[str
         }
 
     If `types` is omitted, includes most element types except openings/spaces.
+
+    Parameters
+    ----------
+    include_normals : bool, default True
+        When False, do not compute/attach per-vertex normals in the output.
+        This reduces work and memory when normals are not needed.
+    share_buffers : bool, default False
+        When True, the returned NumPy arrays for points/normals/indices are
+        zero-copy views into C++ buffers. Ensure the model remains open and
+        not mutated until the data is consumed (e.g., GLB packing).
     """
     ...
 

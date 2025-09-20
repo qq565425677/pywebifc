@@ -254,7 +254,11 @@ static py::dict GetFlatMeshPy(uint32_t modelID, uint32_t expressID)
 // - Each mesh has one primitive: points (float32 list), faces (uint32 index list), material index
 // - Each node references a mesh index, has a name "#<id>", and a 4x4 matrix (length-16 list)
 // - Materials are deduplicated by RGBA color pulled from placements; simple unlit-like baseColor
-static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32_t>> optTypes)
+static py::dict BuildGLTFLike(
+    uint32_t modelID,
+    std::optional<std::vector<uint32_t>> optTypes,
+    bool includeNormals = true,
+    bool shareBuffers = false)
 {
     if (!manager().IsModelOpen(modelID))
         throw std::runtime_error("Model not open");
@@ -297,9 +301,9 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
     // Cache extracted arrays per geometry so multiple materials can reuse
     // the same position/normal/index arrays without re-extracting/copying.
     struct CachedGeomArrays {
-        py::array_t<float> points;
-        py::array_t<float> normals;
-        py::array_t<uint32_t> faces;
+        py::array points;   // keep generic to allow zero-copy views
+        py::array normals;  // may be empty when includeNormals=false
+        py::array faces;
     };
     std::unordered_map<uint32_t, CachedGeomArrays> geomArraysCache; // geometryExpressID -> arrays
 
@@ -344,46 +348,92 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
             const auto &fv = geom.fvertexData; // interleaved [x y z nx ny nz] per vertex
             const auto &idx = geom.indexData;  // 3 per triangle
 
-            // Build NumPy arrays with independent storage to avoid lifetime issues
-            // and inadvertent mutations from the C++ side. This copies data.
             const py::ssize_t item_stride = static_cast<py::ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS);
+            const py::ssize_t row_stride_bytes = item_stride * static_cast<py::ssize_t>(sizeof(float));
 
-            // Positions copy
-            py::array_t<float> points({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
+            if (shareBuffers)
             {
-                auto p = points.mutable_unchecked<2>();
-                const float *src = fv.data();
-                for (size_t i = 0; i < geom.numPoints; ++i)
+                // Zero-copy NumPy views into C++ buffers with proper strides.
+                // NOTE: The underlying memory must remain valid until the GLB pack.
+                // Exporter keeps the model open until after packing, so this is safe.
+                float *base_ptr = const_cast<float *>(fv.data());
+                // points view: offset 0
+                py::array points(
+                    py::buffer_info(
+                        base_ptr,
+                        sizeof(float),
+                        py::format_descriptor<float>::format(),
+                        2,
+                        {static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)},
+                        {row_stride_bytes, static_cast<py::ssize_t>(sizeof(float))}));
+
+                py::array normals;
+                if (includeNormals)
                 {
-                    const float *v = src + i * item_stride;
-                    p(i, 0) = v[0];
-                    p(i, 1) = v[1];
-                    p(i, 2) = v[2];
+                    // normals view: offset +3 floats
+                    py::array tmp(
+                        py::buffer_info(
+                            base_ptr + 3,
+                            sizeof(float),
+                            py::format_descriptor<float>::format(),
+                            2,
+                            {static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)},
+                            {row_stride_bytes, static_cast<py::ssize_t>(sizeof(float))}));
+                    normals = std::move(tmp);
                 }
-            }
 
-            // Normals copy (offset +3 floats)
-            py::array_t<float> normals({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
+                // faces view: contiguous indices
+                py::array faces(
+                    py::buffer_info(
+                        const_cast<uint32_t *>(idx.data()),
+                        sizeof(uint32_t),
+                        py::format_descriptor<uint32_t>::format(),
+                        1,
+                        {static_cast<py::ssize_t>(idx.size())},
+                        {static_cast<py::ssize_t>(sizeof(uint32_t))}));
+
+                geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(normals), std::move(faces)});
+            }
+            else
             {
-                auto n = normals.mutable_unchecked<2>();
-                const float *src = fv.data();
-                for (size_t i = 0; i < geom.numPoints; ++i)
+                // Copying path (previous behavior), but skip normals if not requested
+                py::array_t<float> points({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
                 {
-                    const float *v = src + i * item_stride + 3;
-                    n(i, 0) = v[0];
-                    n(i, 1) = v[1];
-                    n(i, 2) = v[2];
+                    auto p = points.mutable_unchecked<2>();
+                    const float *src = fv.data();
+                    for (size_t i = 0; i < geom.numPoints; ++i)
+                    {
+                        const float *v = src + i * item_stride;
+                        p(i, 0) = v[0];
+                        p(i, 1) = v[1];
+                        p(i, 2) = v[2];
+                    }
                 }
-            }
 
-            // Faces copy
-            py::array_t<uint32_t> faces({static_cast<py::ssize_t>(idx.size())});
-            if (!idx.empty())
-            {
-                std::memcpy(faces.mutable_data(), idx.data(), idx.size() * sizeof(uint32_t));
-            }
+                py::array normals; // may stay empty
+                if (includeNormals)
+                {
+                    py::array_t<float> nrm({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
+                    auto n = nrm.mutable_unchecked<2>();
+                    const float *src = fv.data();
+                    for (size_t i = 0; i < geom.numPoints; ++i)
+                    {
+                        const float *v = src + i * item_stride + 3;
+                        n(i, 0) = v[0];
+                        n(i, 1) = v[1];
+                        n(i, 2) = v[2];
+                    }
+                    normals = std::move(nrm);
+                }
 
-            geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(normals), std::move(faces)});
+                py::array_t<uint32_t> faces({static_cast<py::ssize_t>(idx.size())});
+                if (!idx.empty())
+                {
+                    std::memcpy(faces.mutable_data(), idx.data(), idx.size() * sizeof(uint32_t));
+                }
+
+                geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(normals), std::move(faces)});
+            }
         }
 
         // Primitive
@@ -394,7 +444,10 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
         const auto &cached = geomArraysCache.at(geometryExpressID);
         prim["points"] = cached.points;
         prim["faces"] = cached.faces;
-        prim["normals"] = cached.normals;
+        if (includeNormals && !cached.normals.is_none())
+        {
+            prim["normals"] = cached.normals;
+        }
 
         py::list prims;
         prims.append(std::move(prim));
@@ -985,6 +1038,8 @@ int
         &BuildGLTFLike,
         py::arg("model_id"),
         py::arg("types").none(true) = py::none(),
+        py::arg("include_normals") = true,
+        py::arg("share_buffers") = false,
         R"doc(Build a glTF-like scene graph as Python dicts/lists.
 
 Parameters
@@ -993,6 +1048,11 @@ model_id : int
 types : Optional[List[int]]
     Optional schema type codes to include; defaults to all element types
     excluding openings/spaces.
+include_normals : bool
+    If False, normal arrays are omitted to reduce work/memory.
+share_buffers : bool
+    If True, return zero-copy NumPy views into C++ geometry buffers
+    (lifetime must outlive consumption; safe when model stays open until GLB packing).
 
 Returns
 -------
