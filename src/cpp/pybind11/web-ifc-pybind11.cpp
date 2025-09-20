@@ -294,6 +294,15 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
     std::unordered_map<uint64_t, uint32_t> geomMatToMeshIdx; // (geom<<32)|mat -> mesh index
     std::unordered_map<std::string, uint32_t> colorToMatIdx; // "r,g,b,a" -> material index
 
+    // Cache extracted arrays per geometry so multiple materials can reuse
+    // the same position/normal/index arrays without re-extracting/copying.
+    struct CachedGeomArrays {
+        py::array_t<float> points;
+        py::array_t<float> normals;
+        py::array_t<uint32_t> faces;
+    };
+    std::unordered_map<uint32_t, CachedGeomArrays> geomArraysCache; // geometryExpressID -> arrays
+
     auto get_material_index = [&](const webifc::geometry::IfcPlacedGeometry &pg) -> uint32_t
     {
         // Quantize to 6 decimals to keep keys stable
@@ -327,57 +336,65 @@ static py::dict BuildGLTFLike(uint32_t modelID, std::optional<std::vector<uint32
         if (it != geomMatToMeshIdx.end())
             return it->second;
 
-        // Prepare geometry data
-        auto &geom = geomProc->GetGeometry(geometryExpressID);
-        geom.GetVertexData();              // fills float buffer
-        const auto &fv = geom.fvertexData; // interleaved [x y z nx ny nz] per vertex
-        const auto &idx = geom.indexData;  // 3 per triangle
-
-        // Build NumPy arrays with independent storage to avoid lifetime issues
-        // and inadvertent mutations from the C++ side. This copies data.
-        const py::ssize_t item_stride = static_cast<py::ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS);
-
-        // Positions copy
-        py::array_t<float> points({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
+        // Prepare or reuse geometry data arrays
+        if (!geomArraysCache.contains(geometryExpressID))
         {
-            auto p = points.mutable_unchecked<2>();
-            const float *src = fv.data();
-            for (size_t i = 0; i < geom.numPoints; ++i)
+            auto &geom = geomProc->GetGeometry(geometryExpressID);
+            geom.GetVertexData();              // fills float buffer
+            const auto &fv = geom.fvertexData; // interleaved [x y z nx ny nz] per vertex
+            const auto &idx = geom.indexData;  // 3 per triangle
+
+            // Build NumPy arrays with independent storage to avoid lifetime issues
+            // and inadvertent mutations from the C++ side. This copies data.
+            const py::ssize_t item_stride = static_cast<py::ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS);
+
+            // Positions copy
+            py::array_t<float> points({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
             {
-                const float *v = src + i * item_stride;
-                p(i, 0) = v[0];
-                p(i, 1) = v[1];
-                p(i, 2) = v[2];
+                auto p = points.mutable_unchecked<2>();
+                const float *src = fv.data();
+                for (size_t i = 0; i < geom.numPoints; ++i)
+                {
+                    const float *v = src + i * item_stride;
+                    p(i, 0) = v[0];
+                    p(i, 1) = v[1];
+                    p(i, 2) = v[2];
+                }
             }
-        }
 
-        // Normals copy (offset +3 floats)
-        py::array_t<float> normals({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
-        {
-            auto n = normals.mutable_unchecked<2>();
-            const float *src = fv.data();
-            for (size_t i = 0; i < geom.numPoints; ++i)
+            // Normals copy (offset +3 floats)
+            py::array_t<float> normals({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
             {
-                const float *v = src + i * item_stride + 3;
-                n(i, 0) = v[0];
-                n(i, 1) = v[1];
-                n(i, 2) = v[2];
+                auto n = normals.mutable_unchecked<2>();
+                const float *src = fv.data();
+                for (size_t i = 0; i < geom.numPoints; ++i)
+                {
+                    const float *v = src + i * item_stride + 3;
+                    n(i, 0) = v[0];
+                    n(i, 1) = v[1];
+                    n(i, 2) = v[2];
+                }
             }
-        }
 
-        // Faces copy
-        py::array_t<uint32_t> faces({static_cast<py::ssize_t>(idx.size())});
-        if (!idx.empty())
-        {
-            std::memcpy(faces.mutable_data(), idx.data(), idx.size() * sizeof(uint32_t));
+            // Faces copy
+            py::array_t<uint32_t> faces({static_cast<py::ssize_t>(idx.size())});
+            if (!idx.empty())
+            {
+                std::memcpy(faces.mutable_data(), idx.data(), idx.size() * sizeof(uint32_t));
+            }
+
+            geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(normals), std::move(faces)});
         }
 
         // Primitive
         py::dict prim;
         prim["material"] = py::int_(materialIndex);
-        prim["points"] = std::move(points);
-        prim["faces"] = std::move(faces);
-        prim["normals"] = std::move(normals);
+        // Reuse cached arrays (no move), so subsequent meshes for the same
+        // geometry can share buffers without re-extraction/copy.
+        const auto &cached = geomArraysCache.at(geometryExpressID);
+        prim["points"] = cached.points;
+        prim["faces"] = cached.faces;
+        prim["normals"] = cached.normals;
 
         py::list prims;
         prims.append(std::move(prim));
