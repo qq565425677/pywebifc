@@ -41,28 +41,58 @@ def set_log_level_name(name: str) -> None:
     """
     ...
 
-def create_model() -> int:
+def create_model(**kwargs) -> int:
     """Create an empty in-memory model and return its integer model ID.
 
     Notes
     -----
     Use together with other functions that accept a ``model_id``. Call
     ``close_model(model_id)`` when done to free resources.
+
+    Accepted keyword args (all optional)
+    ------------------------------------
+    - coordinate_to_origin: bool (default False)
+    - circle_segments: int (default 12)
+    - boolean_union_threshold: int (default 150)
+    - tolerance_plane_intersection: float
+    - tolerance_plane_deviation: float
+    - tolerance_back_deviation_distance: float
+    - tolerance_inside_outside_perimeter: float
+    - tolerance_scalar_equality: float
+    - plane_refit_iterations: int
+    - tape_size: int
+    - memory_limit: int
+    - linewriter_buffer: int
     """
     ...
 
-def open_model(path: str) -> int:
+def open_model(path: str, **kwargs) -> int:
     """Open an IFC file from a filesystem path and return its ``model_id``.
 
     Parameters
     ----------
     path : str
         Absolute or relative path to an IFC STEP file.
+    
+    Accepted keyword args (all optional)
+    ------------------------------------
+    - coordinate_to_origin: bool (default False)
+    - circle_segments: int (default 12)
+    - boolean_union_threshold: int (default 150)
+    - tolerance_plane_intersection: float
+    - tolerance_plane_deviation: float
+    - tolerance_back_deviation_distance: float
+    - tolerance_inside_outside_perimeter: float
+    - tolerance_scalar_equality: float
+    - plane_refit_iterations: int
+    - tape_size: int
+    - memory_limit: int
+    - linewriter_buffer: int
 
     Returns
     -------
     int
-        The created model's ID.
+        The opened model's ID.
 
     Raises
     ------

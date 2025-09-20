@@ -631,7 +631,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             pass
 
     with Timer("Open IFC"):
-        mid = w.open_model(args.ifc)
+        mid = w.open_model(
+            args.ifc
+        )
     try:
         # Optional logging setup for warnings
         if args.warnEmpty:

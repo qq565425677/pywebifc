@@ -46,6 +46,60 @@ static uint32_t CreateModel()
     return manager().CreateModel(settings);
 }
 
+// Helper: build LoaderSettings from a Python dict/kwargs
+static webifc::manager::LoaderSettings LoaderSettingsFromDict(py::dict kwargs)
+{
+    webifc::manager::LoaderSettings s;
+
+    auto get_bool = [&](const char *k, bool &out) {
+        py::str key(k);
+        if (kwargs.contains(key))
+            out = py::cast<bool>(kwargs[key]);
+    };
+    auto get_u16 = [&](const char *k, uint16_t &out) {
+        py::str key(k);
+        if (kwargs.contains(key))
+            out = static_cast<uint16_t>(py::cast<int>(kwargs[key]));
+    };
+    auto get_u32 = [&](const char *k, uint32_t &out) {
+        py::str key(k);
+        if (kwargs.contains(key))
+            out = static_cast<uint32_t>(py::cast<long long>(kwargs[key]));
+    };
+    auto get_double = [&](const char *k, double &out) {
+        py::str key(k);
+        if (kwargs.contains(key))
+            out = py::cast<double>(kwargs[key]);
+    };
+
+    get_bool("coordinate_to_origin", s.COORDINATE_TO_ORIGIN);
+    get_u16("circle_segments", s.CIRCLE_SEGMENTS);
+    get_u32("tape_size", s.TAPE_SIZE);
+    get_u32("memory_limit", s.MEMORY_LIMIT);
+    get_u16("linewriter_buffer", s.LINEWRITER_BUFFER);
+    get_double("tolerance_plane_intersection", s.TOLERANCE_PLANE_INTERSECTION);
+    get_double("tolerance_plane_deviation", s.TOLERANCE_PLANE_DEVIATION);
+    get_double("tolerance_back_deviation_distance", s.TOLERANCE_BACK_DEVIATION_DISTANCE);
+    get_double("tolerance_inside_outside_perimeter", s.TOLERANCE_INSIDE_OUTSIDE_PERIMETER);
+    get_double("tolerance_scalar_equality", s.TOLERANCE_SCALAR_EQUALITY);
+    {
+        // plane_refit_iterations is uint16_t but we accept int
+        py::str key("plane_refit_iterations");
+        if (kwargs.contains(key))
+            s.PLANE_REFIT_ITERATIONS = static_cast<uint16_t>(py::cast<int>(kwargs[key]));
+    }
+    get_u16("boolean_union_threshold", s.BOOLEAN_UNION_THRESHOLD);
+
+    return s;
+}
+
+// Create a model with custom settings provided via kwargs (overload for Python)
+static uint32_t CreateModelWithSettings(py::kwargs kwargs)
+{
+    webifc::manager::LoaderSettings settings = LoaderSettingsFromDict(py::dict(kwargs));
+    return manager().CreateModel(settings);
+}
+
 // Convenience: open an IFC model directly from a file path.
 // Returns modelID on success.
 static uint32_t OpenModel(const std::string &path)
@@ -61,6 +115,22 @@ static uint32_t OpenModel(const std::string &path)
     loader->LoadFile(in);
     return modelID;
 }
+
+// Open a model with custom settings provided via kwargs (overload for Python)
+static uint32_t OpenModelWithSettings(const std::string &path, py::kwargs kwargs)
+{
+    webifc::manager::LoaderSettings settings = LoaderSettingsFromDict(py::dict(kwargs));
+    uint32_t modelID = manager().CreateModel(settings);
+    auto *loader = manager().GetIfcLoader(modelID);
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open())
+    {
+        throw std::runtime_error("Failed to open IFC file: " + path);
+    }
+    loader->LoadFile(in);
+    return modelID;
+}
+
 
 static void CloseModel(uint32_t modelID)
 {
@@ -737,6 +807,33 @@ Use together with other functions that accept a ``model_id``. Call
 ``close_model(model_id)`` when done to free resources.
 )doc");
 
+    // Overload: create_model(**settings)
+    m.def(
+        "create_model",
+        &CreateModelWithSettings,
+        R"doc(Create a model with custom loader/geometry settings via keyword args.
+
+Accepted keyword args (all optional)
+------------------------------------
+- coordinate_to_origin: bool (default False)
+- circle_segments: int (default 12)
+- boolean_union_threshold: int (default 150)
+- tolerance_plane_intersection: float
+- tolerance_plane_deviation: float
+- tolerance_back_deviation_distance: float
+- tolerance_inside_outside_perimeter: float
+- tolerance_scalar_equality: float
+- plane_refit_iterations: int
+- tape_size: int
+- memory_limit: int
+- linewriter_buffer: int
+
+Returns
+-------
+int
+    The created model's ID.
+)doc");
+
     // Logging controls
     m.def(
         "set_log_level",
@@ -772,7 +869,7 @@ path : str
 Returns
 -------
 int
-    The created model's ID.
+    The opened model's ID.
 
 Raises
 ------
@@ -785,6 +882,34 @@ Examples
 >>> mid = w.open_model("/path/to/model.ifc")
 >>> w.is_model_open(mid)
 True
+)doc");
+
+    // Overload: open_model(path, **settings)
+    m.def(
+        "open_model",
+        &OpenModelWithSettings,
+        py::arg("path"),
+        R"doc(Open an IFC file with custom settings via keyword args. 
+
+Accepted keyword args (all optional)
+------------------------------------
+- coordinate_to_origin: bool (default False)
+- circle_segments: int (default 12)
+- boolean_union_threshold: int (default 150)
+- tolerance_plane_intersection: float
+- tolerance_plane_deviation: float
+- tolerance_back_deviation_distance: float
+- tolerance_inside_outside_perimeter: float
+- tolerance_scalar_equality: float
+- plane_refit_iterations: int
+- tape_size: int
+- memory_limit: int
+- linewriter_buffer: int
+
+Returns
+-------
+int
+    The opened model's ID.
 )doc");
 
     m.def(
