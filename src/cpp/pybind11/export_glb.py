@@ -8,8 +8,8 @@ Pipeline:
   - pack into a valid GLB (glTF 2.0) without external deps
 
 Usage:
-  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty] [--noClean]
-  python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--warnEmpty] [--noClean]
+  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--noClean]
+  python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--noClean]
 
 Notes:
   - By default exports POSITION + INDICES. Use --normals to also export NORMALs
@@ -331,14 +331,13 @@ def _clean_mesh_numpy(
 
 def gltf_like_to_glb(
     g: Dict[str, Any],
-    out_path: str,
+    out_path: str | None = None,
     include_normals: bool = False,
     winding: str = "auto",  # as-is | flip | auto (default: auto)
     metallic_factor: Optional[float] = None,
     roughness_factor: Optional[float] = None,
-    warn_empty: bool = False,
     clean: bool = True,
-) -> None:
+) -> GLTF2:
 
     gltf = GLTF2(
         scene=0,
@@ -359,6 +358,7 @@ def gltf_like_to_glb(
     gltf.materials = materials_out
 
     # Build a single binary buffer via BinBuilder
+    # Meshes/Primitives/Attributes/Accessors/BufferViews
     binb = BinBuilder()
     gltf_meshes: List[GLTFMesh] = []
     for mesh_idx, mesh in enumerate(g.get("meshes", [])):
@@ -372,10 +372,9 @@ def gltf_like_to_glb(
             pos_f32, vcount = _ensure_float32_xyz(points)
             idx_u32 = _ensure_uint32_indices(faces)
             if vcount == 0 or idx_u32.size == 0:
-                if warn_empty:
-                    logging.warning(
-                        f"Empty primitive skipped (mesh {mesh_idx}, prim {prim_idx})"
-                    )
+                logging.warning(
+                    f"Empty primitive skipped (mesh {mesh_idx}, prim {prim_idx})"
+                )
                 continue
             # If not exporting normals and cleaning enabled, run a lightweight clean to deduplicate
             # vertices/faces and drop degenerates for each primitive mesh.
@@ -383,10 +382,9 @@ def gltf_like_to_glb(
                 pos_f32, idx_u32 = w.clean_mesh(pos_f32, idx_u32)
                 vcount = 0 if pos_f32.size == 0 else pos_f32.size // 3
                 if vcount == 0 or idx_u32.size == 0:
-                    if warn_empty:
-                        logging.warning(
-                            f"Primitive became empty after clean (mesh {mesh_idx}, prim {prim_idx})"
-                        )
+                    logging.warning(
+                        f"Primitive became empty after clean (mesh {mesh_idx}, prim {prim_idx})"
+                    )
                     continue
             # Decide whether to flip winding
             do_flip = False
@@ -404,7 +402,7 @@ def gltf_like_to_glb(
             if include_normals and normals is not None:
                 nrm_f32, ncount = _ensure_float32_xyz(normals)
                 has_normals = ncount == vcount
-                if not has_normals and warn_empty:
+                if not has_normals:
                     logging.warning(
                         f"NORMAL count mismatch; ignoring normals (mesh {mesh_idx}, prim {prim_idx})"
                     )
@@ -461,9 +459,15 @@ def gltf_like_to_glb(
             prims_out.append(prim_out)
         if prims_out:
             gltf_meshes.append(GLTFMesh(primitives=prims_out))
-        elif warn_empty:
+        else:
             logging.warning(f"Mesh {mesh_idx} has no valid primitives")
     gltf.meshes = gltf_meshes
+    gltf.buffers = [GLTFBuffer(byteLength=len(binb.blob))]
+    gltf.bufferViews = binb.buffer_views
+    gltf.accessors = binb.accessors
+    # Attach binary and save
+    gltf.set_binary_blob(bytes(binb.blob))
+
     # Nodes and Scenes
     gltf.nodes = [
         GLTFNode(
@@ -476,14 +480,12 @@ def gltf_like_to_glb(
         for n in g.get("nodes", [])
     ]
     gltf.scenes = [GLTFScene(nodes=s.get("nodes", [])) for s in g.get("scenes", [])]
-    gltf.buffers = [GLTFBuffer(byteLength=len(binb.blob))]
-    gltf.bufferViews = binb.buffer_views
-    gltf.accessors = binb.accessors
-    # Attach binary and save
-    gltf.set_binary_blob(bytes(binb.blob))
-    gltf.save(
-        out_path, asset=GLTFAsset(version="2.0", generator="pywebifc-glb-exporter")
-    )
+
+    if out_path:
+        gltf.save(
+            out_path, asset=GLTFAsset(version="2.0", generator="pywebifc-glb-exporter")
+        )
+    return gltf
 
 
 def build_hierarchical_nodes(
@@ -598,11 +600,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Optional roughnessFactor (0..1). If omitted, not written",
     )
     ap.add_argument(
-        "--warnEmpty",
-        action="store_true",
-        help="Log warnings when primitives are empty or normals mismatch",
-    )
-    ap.add_argument(
         "--noClean",
         dest="clean",
         action="store_false",
@@ -611,7 +608,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     args = ap.parse_args(argv)
 
-    # Apply requested log level before opening model
+    # Apply requested log level before opening model (both web-ifc and Python logging)
     if args.log_level:
         try:
             if hasattr(w, "set_log_level_name"):
@@ -630,24 +627,30 @@ def main(argv: Optional[List[str]] = None) -> None:
         except Exception:
             pass
 
-    with Timer("Open IFC"):
-        mid = w.open_model(
-            args.ifc
-        )
-    try:
-        # Optional logging setup for warnings
-        if args.warnEmpty:
-            import logging as _logging
+        # Configure Python logging level to match
+        py_level = {
+            "trace": logging.DEBUG,
+            "debug": logging.DEBUG,
+            "info": logging.INFO,
+            "warn": logging.WARNING,
+            "error": logging.ERROR,
+            "critical": logging.CRITICAL,
+        }.get(args.log_level, None)
+        if args.log_level == "off":
+            logging.disable(logging.CRITICAL)
+        elif py_level is not None and not logging.getLogger().handlers:
+            logging.basicConfig(level=py_level, format="%(levelname)s: %(message)s")
 
-            if not _logging.getLogger().handlers:
-                _logging.basicConfig(
-                    level=_logging.WARNING, format="%(levelname)s: %(message)s"
-                )
+    with Timer("Open IFC"):
+        mid = w.open_model(args.ifc)
+    try:
 
         with Timer("Build GLTF-like"):
             # Prefer to avoid building normals unless requested, and share buffers
-            # to speed up C++->Python transfer. Fallback if older binding.
-            data = w.build_gltf_like(mid, args.types, include_normals=args.normals, share_buffers=True)
+            # to speed up C++->Python transfer.
+            data = w.build_gltf_like(
+                mid, args.types, include_normals=args.normals, share_buffers=True
+            )
         # Build IFC spatial hierarchy and assemble hierarchical nodes in Python
         with Timer("Build hierarchical nodes"):
             hierarchy = w.build_spatial_hierarchy(mid)
@@ -666,7 +669,6 @@ def main(argv: Optional[List[str]] = None) -> None:
                 winding=args.winding,
                 metallic_factor=args.metallicFactor,
                 roughness_factor=args.roughnessFactor,
-                warn_empty=args.warnEmpty,
                 clean=args.clean,
             )
     finally:
