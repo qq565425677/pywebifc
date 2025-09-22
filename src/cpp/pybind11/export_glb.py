@@ -217,7 +217,7 @@ def _ensure_uint32_indices(x: Any) -> np.ndarray:
 def _estimate_orientation_signed_volume(
     pos_f32_flat: np.ndarray,
     idx_u32: np.ndarray,
-    max_tris: int = 10000,
+    max_tris: int | None = None,
     random_state: int = 0,
 ) -> float:
     """Estimate mesh orientation via signed volume (sum over tetrahedra).
@@ -237,7 +237,7 @@ def _estimate_orientation_signed_volume(
     tri = idx_u32.reshape(-1, 3)
     n_tris = len(tri)
 
-    if n_tris > max_tris:
+    if max_tris is not None and n_tris > max_tris:
         # 随机抽样 max_tris 个三角形
         rng = np.random.default_rng(random_state)
         choice = rng.choice(n_tris, size=max_tris, replace=False)
