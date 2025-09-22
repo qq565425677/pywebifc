@@ -704,7 +704,7 @@ namespace webifc::geometry
                     bounds3D[i] = _geometryLoader.GetBound(boundID);
                 }
 
-                TriangulateBounds(geometry, bounds3D, expressID);
+                TriangulateBounds(geometry, bounds3D, expressID, _settings._computeNormals);
 
                 _loader.MoveToArgumentOffset(expressID, 1);
                 auto surfRef = _loader.GetRefArgument();
@@ -729,7 +729,7 @@ namespace webifc::geometry
                 }
                 else
                 {
-                    TriangulateBounds(geometry, bounds3D, expressID);
+                    TriangulateBounds(geometry, bounds3D, expressID, _settings._computeNormals);
                 }
 
                 _expressIDToGeometry[expressID] = geometry;
@@ -1803,14 +1803,27 @@ namespace webifc::geometry
                             auto a = _geometryLoader.GetCartesianPoint3D(p0);
                             auto b = _geometryLoader.GetCartesianPoint3D(p1);
                             auto c = _geometryLoader.GetCartesianPoint3D(p2);
-                            if (!orient)
+                            if (_settings._computeNormals)
                             {
-                                // reverse winding if orientation is false (matches GetBound behavior)
-                                geometry.AddFaceFast(c, b, a);
+                                if (!orient)
+                                {
+                                    geometry.AddFace(c, b, a);
+                                }
+                                else
+                                {
+                                    geometry.AddFace(a, b, c);
+                                }
                             }
                             else
                             {
-                                geometry.AddFaceFast(a, b, c);
+                                if (!orient)
+                                {
+                                    geometry.AddFaceFast(c, b, a);
+                                }
+                                else
+                                {
+                                    geometry.AddFaceFast(a, b, c);
+                                }
                             }
                             return;
                         }
@@ -1826,7 +1839,7 @@ namespace webifc::geometry
                     uint32_t boundID = _loader.GetRefArgument(bounds[i]);
                     bounds3D[i] = _geometryLoader.GetBound(boundID);
                 }
-                TriangulateBounds(geometry, bounds3D, expressID);
+            TriangulateBounds(geometry, bounds3D, expressID, _settings._computeNormals);
             }
             break;
         }
@@ -1868,7 +1881,7 @@ namespace webifc::geometry
             }
             else
             {
-                TriangulateBounds(geometry, bounds3D, expressID);
+                TriangulateBounds(geometry, bounds3D, expressID, _settings._computeNormals);
             }
             break;
         }

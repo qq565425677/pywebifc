@@ -183,7 +183,7 @@ namespace webifc::geometry
 		return computeSafeNormal(v1, v2, v3, normal, 1e-08);
 	}
 
-	inline void TriangulateBounds(IfcGeometry &geometry, std::vector<IfcBound3D> &bounds, uint32_t expressID)
+	inline void TriangulateBounds(IfcGeometry &geometry, std::vector<IfcBound3D> &bounds, uint32_t expressID, bool compute_normals = true)
 	{
 		spdlog::debug("[TriangulateBounds({})]");
 		if (bounds.size() == 1 && bounds[0].curve.points.size() == 3)
@@ -276,7 +276,7 @@ namespace webifc::geometry
 
 				for (const glm::dvec3& pt : curvePoints)
 				{
-					geometry.AddPoint(pt, n);
+					geometry.AddPoint(pt, compute_normals ? n : glm::dvec3(0, 0, 0));
 
 					// project pt onto plane of curve to obtain 2d coords
 					const glm::dvec3 pt2 = pt - v1;

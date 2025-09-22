@@ -27,6 +27,7 @@ namespace webifc::geometry
     bool _coordinateToOrigin = false;
     bool _optimize_profiles = true;
     bool _exportPolylines = false;
+    bool _computeNormals = true;
     uint16_t _circleSegments = 12;
     double TOLERANCE_PLANE_INTERSECTION = 1.0E-04;
     double TOLERANCE_PLANE_DEVIATION = 1.0E-04;
@@ -56,6 +57,7 @@ namespace webifc::geometry
     IfcFlatMesh GetFlatMesh(uint32_t expressID, bool applyLinearScalingFactor = true);
     IfcComposedMesh GetMesh(uint32_t expressID);
     void SetTransformation(const std::array<double, 16> &val);
+    void SetComputeNormals(bool enabled) { _settings._computeNormals = enabled; }
     std::array<double, 16> GetFlatCoordinationMatrix() const;
     glm::dmat4 GetCoordinationMatrix() const;
     void Clear();

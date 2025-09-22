@@ -265,6 +265,9 @@ static py::dict BuildGLTFLike(
 
     auto *loader = manager().GetIfcLoader(modelID);
     auto *geomProc = manager().GetGeometryProcessor(modelID);
+    // Set geometry processor to compute normals only if requested
+    if (geomProc)
+        geomProc->SetComputeNormals(includeNormals);
 
     // Collect express IDs
     std::vector<uint32_t> expressIds;
