@@ -67,6 +67,9 @@ namespace webifc::geometry {
 		SweptDiskSolid GetSweptDiskSolid();
 		glm::dmat4 Normalize();
 		SweptDiskSolid sweptDiskSolid;
+
+		// Fast triangle add: bypass per-face normal computation.
+		void AddFaceFast(const glm::dvec3 &a, const glm::dvec3 &b, const glm::dvec3 &c);
 		private:
 			void ReverseFace(uint32_t index);
 			bool normalized = false;

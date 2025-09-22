@@ -263,6 +263,16 @@ namespace webifc::geometry {
 		part.push_back(newGeom);
 	}
 
+	void IfcGeometry::AddFaceFast(const glm::dvec3 &a, const glm::dvec3 &b, const glm::dvec3 &c)
+	{
+		// Add three vertices with a placeholder normal to avoid computeSafeNormal
+		glm::dvec3 n(0.0, 0.0, 1.0);
+		AddPoint(a, n);
+		AddPoint(b, n);
+		AddPoint(c, n);
+		AddFace(numPoints - 3, numPoints - 2, numPoints - 1, (uint32_t)-1);
+	}
+
 	void IfcGeometry::AddGeometry(Geometry geom, glm::dmat4 trans, double scx, double scy, double scz, glm::dvec3 origin)
 	{
 		for (uint32_t i = 0; i < geom.numFaces; i++)

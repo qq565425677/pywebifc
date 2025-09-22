@@ -1775,18 +1775,59 @@ namespace webifc::geometry
         {
         case schema::IFCFACE:
         {
+            // Fast-path: most faces are single POLYLOOP triangles. Bypass allocations/earcut.
             _loader.MoveToArgumentOffset(expressID, 0);
             auto bounds = _loader.GetSetArgument();
-
-            std::vector<IfcBound3D> bounds3D(bounds.size());
-
-            for (size_t i = 0; i < bounds.size(); i++)
+            if (bounds.size() == 1)
             {
-                uint32_t boundID = _loader.GetRefArgument(bounds[i]);
-                bounds3D[i] = _geometryLoader.GetBound(boundID);
+                uint32_t boundID = _loader.GetRefArgument(bounds[0]);
+                auto bType = _loader.GetLineType(boundID);
+                if (bType == schema::IFCFACEOUTERBOUND || bType == schema::IFCFACEBOUND)
+                {
+                    // Get loop and orientation
+                    _loader.MoveToArgumentOffset(boundID, 0);
+                    uint32_t loopID = _loader.GetRefArgument();
+                    _loader.MoveToArgumentOffset(boundID, 1);
+                    std::string_view orientValue = _loader.GetStringArgument();
+                    bool orient = orientValue == "T";
+
+                    if (_loader.GetLineType(loopID) == schema::IFCPOLYLOOP)
+                    {
+                        _loader.MoveToArgumentOffset(loopID, 0);
+                        auto pts = _loader.GetSetArgument();
+                        if (pts.size() == 3)
+                        {
+                            uint32_t p0 = _loader.GetRefArgument(pts[0]);
+                            uint32_t p1 = _loader.GetRefArgument(pts[1]);
+                            uint32_t p2 = _loader.GetRefArgument(pts[2]);
+                            auto a = _geometryLoader.GetCartesianPoint3D(p0);
+                            auto b = _geometryLoader.GetCartesianPoint3D(p1);
+                            auto c = _geometryLoader.GetCartesianPoint3D(p2);
+                            if (!orient)
+                            {
+                                // reverse winding if orientation is false (matches GetBound behavior)
+                                geometry.AddFaceFast(c, b, a);
+                            }
+                            else
+                            {
+                                geometry.AddFaceFast(a, b, c);
+                            }
+                            return;
+                        }
+                    }
+                }
             }
 
-            TriangulateBounds(geometry, bounds3D, expressID);
+            // Fallback: generic path (supports holes, polygons > 3, non-polyloop, etc.)
+            {
+                std::vector<IfcBound3D> bounds3D(bounds.size());
+                for (size_t i = 0; i < bounds.size(); i++)
+                {
+                    uint32_t boundID = _loader.GetRefArgument(bounds[i]);
+                    bounds3D[i] = _geometryLoader.GetBound(boundID);
+                }
+                TriangulateBounds(geometry, bounds3D, expressID);
+            }
             break;
         }
         case schema::IFCADVANCEDFACE:
