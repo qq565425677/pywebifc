@@ -12,27 +12,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# On Linux, ensure static libs are built with -fPIC so they can link
-# into the Python shared module without relocation errors.
-if(UNIX AND NOT APPLE)
-  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-endif()
-
 # 调试取消注释下面两行
 # set(CMAKE_BUILD_TYPE Debug)
 # set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fno-omit-frame-pointer")
 
 # Bring in the core web-ifc library from the parent directory
 add_subdirectory(.. core_build)
-
-# Make sure the core static library is position independent when linking
-# into the Python extension (shared module).
-if(TARGET web-ifc-library)
-  set_property(TARGET web-ifc-library PROPERTY POSITION_INDEPENDENT_CODE ON)
-  if(UNIX AND NOT APPLE)
-    target_compile_options(web-ifc-library PRIVATE -fPIC)
-  endif()
-endif()
 
 # Prefer a locally installed pybind11 (e.g., via pip in your mamba/conda env),
 # and fall back to FetchContent if not found.
