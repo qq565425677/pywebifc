@@ -12,12 +12,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# On Linux, ensure static libs are built with -fPIC so they can link
+# into the Python shared module without relocation errors.
+if(UNIX AND NOT APPLE)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # 调试取消注释下面两行
 # set(CMAKE_BUILD_TYPE Debug)
 # set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fno-omit-frame-pointer")
 
 # Bring in the core web-ifc library from the parent directory
 add_subdirectory(.. core_build)
+
+# Make sure the core static library is position independent when linking
+# into the Python extension (shared module).
+if(TARGET web-ifc-library)
+  set_property(TARGET web-ifc-library PROPERTY POSITION_INDEPENDENT_CODE ON)
+  if(UNIX AND NOT APPLE)
+    target_compile_options(web-ifc-library PRIVATE -fPIC)
+  endif()
+endif()
 
 # Prefer a locally installed pybind11 (e.g., via pip in your mamba/conda env),
 # and fall back to FetchContent if not found.
@@ -64,6 +79,18 @@ pybind11_add_module(pywebifc MODULE
 
 target_link_libraries(pywebifc PRIVATE web-ifc-library)
 target_compile_features(pywebifc PRIVATE cxx_std_20)
+
+# Avoid libstdc++ version mismatch on Linux by statically linking
+# libstdc++ and libgcc into the extension module. This reduces
+# runtime dependency on the host's libstdc++.
+if(UNIX AND NOT APPLE)
+  include(CheckCXXCompilerFlag)
+  # Only add if supported by compiler
+  check_cxx_compiler_flag("-static-libstdc++" HAS_STATIC_LIBSTDCXX)
+  if(HAS_STATIC_LIBSTDCXX)
+    target_link_options(pywebifc PRIVATE -static-libstdc++ -static-libgcc)
+  endif()
+endif()
 
 # --- CTest integration: minimal smoke + import tests ---
 include(CTest)
