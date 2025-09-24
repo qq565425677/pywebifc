@@ -136,11 +136,32 @@ Although the primary focus of the library is to be used through WebAssembly in t
 
 Add `--no-build-isolation` if you don't want to re-download all dependencies every time you rebuild the extension, i.e., `pip install -e . --no-build-isolation`.
 
+If you encounter a "cannot find \<format\>" (missing `<format>` header) error when installing on Linux, it usually means your GCC/libstdc++ is too old. You can use Docker to build and use pywebifc without changing your system toolchain:
+
+run from `src/cpp/pybind11`:
+
+```bash
+docker run --rm \
+  -e CMAKE_BUILD_PARALLEL_LEVEL=4 \
+  -v "$PWD/..":/repo \
+  quay.io/pypa/manylinux_2_28_x86_64 \
+  bash -lc 'set -eux; \
+    PYBIN=/opt/python/cp312-cp312/bin; \
+    "$PYBIN/python" -m pip install -U pip setuptools wheel cmake ninja pybind11 auditwheel; \
+    "$PYBIN/python" -m pip wheel /repo/pybind11 -w /repo/pybind11/wheels; \
+    auditwheel repair /repo/pybind11/wheels/*pywebifc*.whl -w /repo/pybind11/dist'
+```
+
+- Replace `cp312-cp312` with the Python version you need inside the container.
+- Then install the repaired wheel from `src/cpp/pybind11/dist`, e.g.: `pip install ./pywebifc.whl`.
+
 After installation you can:
+
 - Import in Python: `import pywebifc as w` and `from export_glb import gltf_like_to_glb`.
 - Use CLI: `pywebifc-export-glb input.ifc output.glb`.
 
 Editor hints / stubs
+
 - The wheel installs `pybind11/stubs/pywebifc.pyi` alongside the compiled module, so IDEs (VS Code/Pylance, PyCharm, mypy/pyright) show function signatures and docstrings on hover.
 - There are several optional arguments available to customize the GLB output. Use `pywebifc-export-glb -h` for details.
 
@@ -148,3 +169,42 @@ Editor hints / stubs
 
 - The CMake for the Python extension is at `src/cpp/pybind11/CMakeLists.txt` and links the core library from `src/cpp`.
 - To avoid fetching pybind11 in CMake, install it in your Python env: `pip install pybind11`.
+
+### IFC2GLB Dockerfile
+
+If you only need to export GLB files on Linux, you can also build a Docker image:
+
+run from `src/cpp`:
+
+```bash
+docker build \
+  --build-arg UID=$(id -u) \
+  --build-arg GID=$(id -g) \
+  -f pybind11/Dockerfile \
+  -t pywebifc:gcc14 .
+```
+
+- If you need a proxy during build, you can pass:
+  `--build-arg HTTP_PROXY="http://127.0.0.1:1080" --build-arg HTTPS_PROXY="http://127.0.0.1:1080"` (adjust to your proxy).
+
+To convert an IFC to GLB:
+
+```bash
+IFC_FILE="path_to_your_ifc_file.ifc"
+docker run --rm \
+  -v "$(dirname "$IFC_FILE"):/work/" \
+  pywebifc:gcc14 \
+  "/work/$(basename "$IFC_FILE")" \
+  "/work/$(basename "$IFC_FILE" .ifc).glb"
+
+```
+
+To batch convert all IFC files in a directory:
+
+```bash
+SRC_DIR="path_to_your_ifc_files_directory"
+docker run --rm \
+  -v "$SRC_DIR:/work/" \
+  pywebifc:gcc14 \
+  bash -lc 'set -eux; shopt -s nullglob; for f in /work/*.ifc; do b=$(basename "$f" .ifc); pywebifc-export-glb "$f" "/work/${b}.glb"; done'
+```

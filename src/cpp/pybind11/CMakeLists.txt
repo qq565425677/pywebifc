@@ -1,8 +1,8 @@
-# cmake -S pybind11 -B build/pybind11
-# cmake -S pybind11 -B build/pybind11 -DPython3_EXECUTABLE=$(which python)
+# cmake -S . -B build/pybind11
+# cmake -S . -B build/pybind11 -DPython3_EXECUTABLE=$(which python)
 # cmake --build ./build/pybind11 --config Release --target pywebifc -j 32
 
-# docker run --rm -e CMAKE_BUILD_PARALLEL_LEVEL=4 -v "$PWD/..":/repo quay.io/pypa/manylinux_2_28_x86_64 bash -lc 'set -eux; PYBIN=/opt/python/cp313-cp313/bin; "$PYBIN/python" -m pip install -U pip setuptools wheel cmake ninja pybind11 auditwheel; "$PYBIN/python" -m pip wheel /repo/pybind11 -w /repo/pybind11/wheels; auditwheel repair /repo/pybind11/wheels/*pywebifc*.whl -w /repo/pybind11/dist'
+# docker run --rm -e CMAKE_BUILD_PARALLEL_LEVEL=4 -v "$PWD/..":/repo quay.io/pypa/manylinux_2_28_x86_64 bash -lc 'set -eux; PYBIN=/opt/python/cp312-cp312/bin; "$PYBIN/python" -m pip install -U pip setuptools wheel cmake ninja pybind11 auditwheel; "$PYBIN/python" -m pip wheel /repo/pybind11 -w /repo/pybind11/wheels; auditwheel repair /repo/pybind11/wheels/*pywebifc*.whl -w /repo/pybind11/dist'
 
 cmake_minimum_required(VERSION 3.18)
 project(pywebifc LANGUAGES CXX)
