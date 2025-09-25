@@ -305,7 +305,6 @@ static py::dict BuildGLTFLike(
     // the same position/normal/index arrays without re-extracting/copying.
     struct CachedGeomArrays {
         py::array points;   // keep generic to allow zero-copy views
-        py::array normals;  // may be empty when includeNormals=false
         py::array faces;
     };
     std::unordered_map<uint32_t, CachedGeomArrays> geomArraysCache; // geometryExpressID -> arrays
@@ -348,44 +347,25 @@ static py::dict BuildGLTFLike(
         {
             auto &geom = geomProc->GetGeometry(geometryExpressID);
             geom.GetVertexData();              // fills float buffer
-            const auto &fv = geom.fvertexData; // interleaved [x y z nx ny nz] per vertex
+            const auto &fv = geom.fvertexData; // interleaved [x y z nx ny nz] per vertex (normals may be zeroed)
             const auto &idx = geom.indexData;  // 3 per triangle
 
-            const py::ssize_t item_stride = static_cast<py::ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS);
+            const py::ssize_t item_stride = static_cast<py::ssize_t>(webifc::geometry::VERTEX_FORMAT_SIZE_FLOATS); // expected 6
             const py::ssize_t row_stride_bytes = item_stride * static_cast<py::ssize_t>(sizeof(float));
 
             if (shareBuffers)
             {
-                // Zero-copy NumPy views into C++ buffers with proper strides.
-                // NOTE: The underlying memory must remain valid until the GLB pack.
-                // Exporter keeps the model open until after packing, so this is safe.
+                // Zero-copy view over interleaved array (Nx6)
                 float *base_ptr = const_cast<float *>(fv.data());
-                // points view: offset 0
                 py::array points(
                     py::buffer_info(
                         base_ptr,
                         sizeof(float),
                         py::format_descriptor<float>::format(),
                         2,
-                        {static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)},
+                        {static_cast<py::ssize_t>(geom.numPoints), item_stride},
                         {row_stride_bytes, static_cast<py::ssize_t>(sizeof(float))}));
 
-                py::array normals;
-                if (includeNormals)
-                {
-                    // normals view: offset +3 floats
-                    py::array tmp(
-                        py::buffer_info(
-                            base_ptr + 3,
-                            sizeof(float),
-                            py::format_descriptor<float>::format(),
-                            2,
-                            {static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)},
-                            {row_stride_bytes, static_cast<py::ssize_t>(sizeof(float))}));
-                    normals = std::move(tmp);
-                }
-
-                // faces view: contiguous indices
                 py::array faces(
                     py::buffer_info(
                         const_cast<uint32_t *>(idx.data()),
@@ -395,62 +375,48 @@ static py::dict BuildGLTFLike(
                         {static_cast<py::ssize_t>(idx.size())},
                         {static_cast<py::ssize_t>(sizeof(uint32_t))}));
 
-                geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(normals), std::move(faces)});
+                geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(faces)});
             }
             else
             {
-                // Copying path (previous behavior), but skip normals if not requested
-                py::array_t<float> points({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
+                // Copy path: copy entire interleaved buffer to (Nx6) array
+                py::array_t<float> points({static_cast<py::ssize_t>(geom.numPoints), item_stride});
+                if (geom.numPoints > 0)
                 {
-                    auto p = points.mutable_unchecked<2>();
-                    const float *src = fv.data();
-                    for (size_t i = 0; i < geom.numPoints; ++i)
+                    // Source fv is already tightly packed interleaved [x y z nx ny nz]*N
+                    const size_t expected = static_cast<size_t>(geom.numPoints) * static_cast<size_t>(item_stride);
+                    if (fv.size() >= expected)
                     {
-                        const float *v = src + i * item_stride;
-                        p(i, 0) = v[0];
-                        p(i, 1) = v[1];
-                        p(i, 2) = v[2];
+                        std::memcpy(points.mutable_data(), fv.data(), expected * sizeof(float));
+                    }
+                    else
+                    {
+                        // Fallback: defensive copy with bounds checking (should not happen)
+                        auto p = points.mutable_unchecked<2>();
+                        const float *src = fv.data();
+                        for (size_t i = 0; i < geom.numPoints; ++i)
+                        {
+                            const float *v = src + i * item_stride;
+                            for (py::ssize_t c = 0; c < item_stride; ++c)
+                                p(i, c) = v[c];
+                        }
                     }
                 }
-
-                py::array normals; // may stay empty
-                if (includeNormals)
-                {
-                    py::array_t<float> nrm({static_cast<py::ssize_t>(geom.numPoints), static_cast<py::ssize_t>(3)});
-                    auto n = nrm.mutable_unchecked<2>();
-                    const float *src = fv.data();
-                    for (size_t i = 0; i < geom.numPoints; ++i)
-                    {
-                        const float *v = src + i * item_stride + 3;
-                        n(i, 0) = v[0];
-                        n(i, 1) = v[1];
-                        n(i, 2) = v[2];
-                    }
-                    normals = std::move(nrm);
-                }
-
                 py::array_t<uint32_t> faces({static_cast<py::ssize_t>(idx.size())});
                 if (!idx.empty())
                 {
                     std::memcpy(faces.mutable_data(), idx.data(), idx.size() * sizeof(uint32_t));
                 }
-
-                geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(normals), std::move(faces)});
+                geomArraysCache.emplace(geometryExpressID, CachedGeomArrays{std::move(points), std::move(faces)});
             }
         }
 
-        // Primitive
+        // Primitive (single interleaved points array; normals are embedded in columns 3..5)
         py::dict prim;
         prim["material"] = py::int_(materialIndex);
-        // Reuse cached arrays (no move), so subsequent meshes for the same
-        // geometry can share buffers without re-extraction/copy.
         const auto &cached = geomArraysCache.at(geometryExpressID);
-        prim["points"] = cached.points;
+        prim["points"] = cached.points; // shape (N,6) always
         prim["faces"] = cached.faces;
-        if (includeNormals && !cached.normals.is_none())
-        {
-            prim["normals"] = cached.normals;
-        }
 
         py::list prims;
         prims.append(std::move(prim));
@@ -1063,7 +1029,8 @@ dict
     {
       'scenes': [ {'nodes': [int, ...]} ],
       'nodes': [ {'mesh': int, 'name': str, 'matrix': [float x16]}, ... ],
-      'meshes': [ {'primitives': [ {'material': int, 'points': [float], 'normals': [float], 'faces': [int]} ]}, ... ],
+            'meshes': [ {'primitives': [ {'material': int, 'points': float[N,6], 'faces': [int]} ]}, ... ],
+                // points is interleaved [x y z nx ny nz]; normals columns may be zero if include_normals=False
       'materials': [ {'baseColorFactor': [float x4]}, ... ]
     }
 )doc");

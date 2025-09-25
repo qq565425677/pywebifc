@@ -12,8 +12,10 @@ Usage:
   python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--noClean]
 
 Notes:
-  - By default exports POSITION + INDICES. Use --normals to also export NORMALs
-    if present in the glTF-like input. (No UVs.)
+    - Underlying C++ now always provides an interleaved (N,6) float array per primitive:
+        [x y z nx ny nz]. Normals may be zeroed if not computed.
+        When --normals is passed, exporter extracts columns 3..5 as NORMAL attribute.
+        Without --normals only POSITION (first 3 floats) is used. No separate prim['normals'] key.
   - Each primitive becomes TRIANGLES with uint16/uint32 indices.
   - --winding can flip triangle index order (CW<->CCW). Default 'auto' attempts
     a quick orientation check (signed volume estimate) and flips if negative.
@@ -365,10 +367,20 @@ def gltf_like_to_glb(
         prims_out: List[GLTFPrimitive] = []
         for prim_idx, prim in enumerate(mesh.get("primitives", [])):
             points = prim.get("points", None)
-            normals = prim.get("normals", None)
+            # New: points is (N,6) interleaved [x y z nx ny nz]; normals key removed in C++ layer.
+            normals = None
             faces = prim.get("faces", None)
             material_idx = prim.get("material")
             # Convert to NumPy arrays
+            # Accept (N,3) legacy or (N,6) new layout. If (N,6), slice.
+            if points is not None:
+                arr_pts = np.asarray(points)
+                if arr_pts.ndim == 2 and arr_pts.shape[1] == 6:
+                    # Separate position and normals; even if include_normals=False we keep pos only.
+                    pos_part = arr_pts[:, :3]
+                    if include_normals:
+                        normals = arr_pts[:, 3:6]
+                    points = pos_part
             pos_f32, vcount = _ensure_float32_xyz(points)
             idx_u32 = _ensure_uint32_indices(faces)
             if vcount == 0 or idx_u32.size == 0:
