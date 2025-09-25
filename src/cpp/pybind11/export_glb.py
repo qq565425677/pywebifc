@@ -54,6 +54,13 @@ from pygltflib import (
     UNSIGNED_INT,
 )
 
+from meshoptimizer import (
+    optimize_vertex_cache,
+    optimize_overdraw,
+    optimize_vertex_fetch,
+    simplify,
+)
+
 
 def ensure_build_path_on_sys_path() -> None:
     here = Path(__file__).resolve().parent
@@ -342,44 +349,25 @@ def gltf_like_to_glb(
 ) -> GLTF2:
 
     # ----- Helpers (local, keep namespace clean) -----
-    def extract_positions_normals(prim: Dict[str, Any]) -> tuple[np.ndarray, int, Optional[np.ndarray], Optional[np.ndarray]]:
-        """Return (pos_f32_flat, vcount, normals_2d_or_none, interleaved_2d_or_none).
-
-        - Accepts legacy points (N,3) or new interleaved (N,6) [x y z nx ny nz].
-        - Only provides normals if include_normals is True.
-        - Keeps a view of the interleaved source to allow zero-copy packing.
-        """
-        points = prim.get("points", None)
-        normals_2d: Optional[np.ndarray] = None
-        interleaved_src: Optional[np.ndarray] = None
-        if points is not None:
-            arr = np.asarray(points)
-            if arr.ndim == 2 and arr.shape[1] == 6:
-                interleaved_src = arr
-                if include_normals:
-                    normals_2d = arr[:, 3:6]
-                points = arr[:, :3]
-        pos_f32, vcount = _ensure_float32_xyz(points)
-        return pos_f32, vcount, normals_2d, interleaved_src
-
     def compute_winding_flip(pos_f32: np.ndarray, idx_u32: np.ndarray) -> bool:
         if winding == "flip":
             return True
         if winding == "as-is":
             return False
-        # auto: estimate signed volume; sample for large meshes for speed
-        # Keep behavior stable by defaulting to full pass for smaller meshes
+        # auto: estimate signed volume; sample for large meshes for speed xxxxxxxxxx
+        # Keep behavior stable by defaulting to full pass for smaller meshes xxxxxxxxxx
         max_tris = None
-        tri_count = idx_u32.size // 3
-        if tri_count > 500_000:
-            max_tris = 200_000
-        signed = _estimate_orientation_signed_volume(pos_f32, idx_u32, max_tris=max_tris)
+        # do not sample, use all
+        # tri_count = idx_u32.size // 3
+        # if tri_count > 500_000:
+        #     max_tris = 200_000
+        signed = _estimate_orientation_signed_volume(
+            pos_f32, idx_u32, max_tris=max_tris
+        )
         return signed < 0.0
 
     def pack_vertices(
         pos_f32: np.ndarray,
-        vcount: int,
-        normals_2d: Optional[np.ndarray],
         interleaved_src: Optional[np.ndarray],
         do_flip: bool,
     ) -> tuple[int, Optional[int]]:
@@ -388,9 +376,13 @@ def gltf_like_to_glb(
         Returns (acc_pos_idx, acc_nrm_idx_or_none).
         """
         # Common min/max for POSITION
+        if pos_f32.size == 0:
+            raise ValueError("Cannot pack empty position array")
+
         pos3 = pos_f32.reshape(-1, 3)
         mn = pos3.min(axis=0).astype(np.float32).tolist()
         mx = pos3.max(axis=0).astype(np.float32).tolist()
+        vcount = int(pos3.shape[0])
 
         # Interleaved zero-copy path
         if include_normals and interleaved_src is not None:
@@ -399,12 +391,13 @@ def gltf_like_to_glb(
                 src = src.copy()
                 src[:, 3:6] *= -1.0
             bv_idx = binb.add_view(
-                np.ascontiguousarray(src, dtype=np.float32).tobytes(order="C"), ARRAY_BUFFER
+                np.ascontiguousarray(src, dtype=np.float32).tobytes(order="C"),
+                ARRAY_BUFFER,
             )
             try:
                 binb.buffer_views[bv_idx].byteStride = 6 * 4
             except Exception:
-                pass
+                raise ValueError("Failed to set byteStride for interleaved buffer view")
             acc_pos = binb.add_accessor(
                 buffer_view=bv_idx,
                 component_type=FLOAT,
@@ -434,38 +427,13 @@ def gltf_like_to_glb(
             minv=mn,
             maxv=mx,
         )
-        if include_normals and normals_2d is not None:
-            nrm_f32, ncount = _ensure_float32_xyz(normals_2d)
-            if ncount == vcount:
-                if do_flip:
-                    nrm_f32 = (-nrm_f32).astype(np.float32, copy=False)
-                bv_nrm = binb.add_view(nrm_f32.tobytes(order="C"), ARRAY_BUFFER)
-                acc_nrm = binb.add_accessor(
-                    buffer_view=bv_nrm,
-                    component_type=FLOAT,
-                    count=vcount,
-                    type_str="VEC3",
-                )
-            else:
-                logging.warning(
-                    "NORMAL count mismatch; ignoring normals (vcount=%d, ncount=%d)",
-                    vcount,
-                    ncount,
-                )
         return acc_pos, acc_nrm
 
     def pack_indices(idx_u32: np.ndarray) -> tuple[int, int, np.ndarray]:
         """Choose smallest component type, add view + accessor. Returns (acc_idx, comp_type, packed_arr)."""
         if idx_u32.size == 0:
             # Should not happen here; caller checks empties
-            bv_idx = binb.add_view(idx_u32.tobytes(order="C"), ELEMENT_ARRAY_BUFFER)
-            acc_idx = binb.add_accessor(
-                buffer_view=bv_idx,
-                component_type=UNSIGNED_INT,
-                count=0,
-                type_str="SCALAR",
-            )
-            return acc_idx, UNSIGNED_INT, idx_u32
+            raise ValueError("Cannot pack empty index array")
         max_idx = int(idx_u32.max())
         if max_idx <= 65535:
             comp = UNSIGNED_SHORT
@@ -504,13 +472,26 @@ def gltf_like_to_glb(
     for mesh_idx, mesh in enumerate(g.get("meshes", [])):
         prims_out: List[GLTFPrimitive] = []
         for prim_idx, prim in enumerate(mesh.get("primitives", [])):
+            interleaved_src = prim.get("points", None)
             faces = prim.get("faces", None)
-            material_idx = prim.get("material")
+            material_idx = prim.get("material", None)
+            if any(x is None for x in (interleaved_src, faces, material_idx)):
+                raise ValueError(
+                    f"Primitive missing required data (mesh {mesh_idx}, prim {prim_idx})"
+                )
+            interleaved_src = np.ascontiguousarray(interleaved_src, dtype=np.float32)
+            faces = np.ascontiguousarray(faces, dtype=np.uint32).reshape(-1)
+
+            # 0) Optimize indices and vertices for better GPU performance
+            optimize_vertex_cache(faces, faces)  # vertex_count is automatically derived
+            optimize_overdraw(faces, faces, interleaved_src, vertex_positions_stride=24)
+            optimize_vertex_fetch(interleaved_src, faces, interleaved_src)
 
             # 1) Positions, normals, counts
-            pos_f32, vcount, normals_2d, interleaved_src = extract_positions_normals(prim)
-            idx_u32 = _ensure_uint32_indices(faces)
-            if vcount == 0 or idx_u32.size == 0:
+            points = np.ascontiguousarray(
+                interleaved_src[:, :3], dtype=np.float32
+            ).reshape(-1)
+            if points.size == 0 or faces.size == 0:
                 logging.warning(
                     "Empty primitive skipped (mesh %d, prim %d)", mesh_idx, prim_idx
                 )
@@ -518,9 +499,8 @@ def gltf_like_to_glb(
 
             # 2) Optional clean (only when normals are not exported)
             if (not include_normals) and clean:
-                pos_f32, idx_u32 = w.clean_mesh(pos_f32, idx_u32)
-                vcount = pos_f32.size // 3 if pos_f32.size else 0
-                if vcount == 0 or idx_u32.size == 0:
+                points, faces = w.clean_mesh(points, faces)
+                if points.size == 0 or faces.size == 0:
                     logging.warning(
                         "Primitive became empty after clean (mesh %d, prim %d)",
                         mesh_idx,
@@ -529,25 +509,22 @@ def gltf_like_to_glb(
                     continue
 
             # 3) Winding
-            do_flip = compute_winding_flip(pos_f32, idx_u32)
+            do_flip = compute_winding_flip(points, faces)
             if do_flip:
-                idx_u32 = _flip_winding_u32(idx_u32)
+                faces = _flip_winding_u32(faces)
 
             # 4) Pack vertices and indices
-            acc_pos_idx, acc_nrm_idx = pack_vertices(
-                pos_f32, vcount, normals_2d, interleaved_src, do_flip
-            )
-            acc_idx_idx, _, _ = pack_indices(idx_u32)
+            acc_pos_idx, acc_nrm_idx = pack_vertices(points, interleaved_src, do_flip)
+            acc_idx_idx, _, _ = pack_indices(faces)
 
             # 5) Assemble primitive
             prim_out = GLTFPrimitive()
-            prim_out.attributes.POSITION = acc_pos_idx  # type: ignore
+            prim_out.attributes.POSITION = acc_pos_idx
             if acc_nrm_idx is not None:
-                prim_out.attributes.NORMAL = acc_nrm_idx  # type: ignore
+                prim_out.attributes.NORMAL = acc_nrm_idx
             prim_out.indices = acc_idx_idx
             prim_out.mode = 4  # TRIANGLES
-            if material_idx is not None:
-                prim_out.material = int(material_idx)
+            prim_out.material = int(material_idx)
             prims_out.append(prim_out)
 
         if prims_out:
@@ -576,7 +553,9 @@ def gltf_like_to_glb(
     gltf.scenes = [GLTFScene(nodes=s.get("nodes", [])) for s in g.get("scenes", [])]
 
     if out_path:
-        gltf.save(out_path, asset=GLTFAsset(version="2.0", generator="pywebifc-glb-exporter"))
+        gltf.save(
+            out_path, asset=GLTFAsset(version="2.0", generator="pywebifc-glb-exporter")
+        )
     return gltf
 
 
