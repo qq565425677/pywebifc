@@ -418,7 +418,7 @@ def gltf_like_to_glb(
 
         # Non-interleaved path; optionally include normals as separate view
         acc_nrm = None
-        bv_pos = binb.add_view(pos_f32.tobytes(order="C"), ARRAY_BUFFER)
+        bv_pos = binb.add_view(np.asanyarray(pos_f32, dtype=np.float32).tobytes(order="C"), ARRAY_BUFFER)
         acc_pos = binb.add_accessor(
             buffer_view=bv_pos,
             component_type=FLOAT,
