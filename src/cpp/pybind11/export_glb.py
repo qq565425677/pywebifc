@@ -341,143 +341,225 @@ def gltf_like_to_glb(
     clean: bool = True,
 ) -> GLTF2:
 
-    gltf = GLTF2(
-        scene=0,
-        scenes=g["scenes"],
-    )
+    # ----- Helpers (local, keep namespace clean) -----
+    def extract_positions_normals(prim: Dict[str, Any]) -> tuple[np.ndarray, int, Optional[np.ndarray], Optional[np.ndarray]]:
+        """Return (pos_f32_flat, vcount, normals_2d_or_none, interleaved_2d_or_none).
+
+        - Accepts legacy points (N,3) or new interleaved (N,6) [x y z nx ny nz].
+        - Only provides normals if include_normals is True.
+        - Keeps a view of the interleaved source to allow zero-copy packing.
+        """
+        points = prim.get("points", None)
+        normals_2d: Optional[np.ndarray] = None
+        interleaved_src: Optional[np.ndarray] = None
+        if points is not None:
+            arr = np.asarray(points)
+            if arr.ndim == 2 and arr.shape[1] == 6:
+                interleaved_src = arr
+                if include_normals:
+                    normals_2d = arr[:, 3:6]
+                points = arr[:, :3]
+        pos_f32, vcount = _ensure_float32_xyz(points)
+        return pos_f32, vcount, normals_2d, interleaved_src
+
+    def compute_winding_flip(pos_f32: np.ndarray, idx_u32: np.ndarray) -> bool:
+        if winding == "flip":
+            return True
+        if winding == "as-is":
+            return False
+        # auto: estimate signed volume; sample for large meshes for speed
+        # Keep behavior stable by defaulting to full pass for smaller meshes
+        max_tris = None
+        tri_count = idx_u32.size // 3
+        if tri_count > 500_000:
+            max_tris = 200_000
+        signed = _estimate_orientation_signed_volume(pos_f32, idx_u32, max_tris=max_tris)
+        return signed < 0.0
+
+    def pack_vertices(
+        pos_f32: np.ndarray,
+        vcount: int,
+        normals_2d: Optional[np.ndarray],
+        interleaved_src: Optional[np.ndarray],
+        do_flip: bool,
+    ) -> tuple[int, Optional[int]]:
+        """Create bufferViews/accessors for POSITION (and NORMAL if present).
+
+        Returns (acc_pos_idx, acc_nrm_idx_or_none).
+        """
+        # Common min/max for POSITION
+        pos3 = pos_f32.reshape(-1, 3)
+        mn = pos3.min(axis=0).astype(np.float32).tolist()
+        mx = pos3.max(axis=0).astype(np.float32).tolist()
+
+        # Interleaved zero-copy path
+        if include_normals and interleaved_src is not None:
+            src = interleaved_src
+            if do_flip:
+                src = src.copy()
+                src[:, 3:6] *= -1.0
+            bv_idx = binb.add_view(
+                np.ascontiguousarray(src, dtype=np.float32).tobytes(order="C"), ARRAY_BUFFER
+            )
+            try:
+                binb.buffer_views[bv_idx].byteStride = 6 * 4
+            except Exception:
+                pass
+            acc_pos = binb.add_accessor(
+                buffer_view=bv_idx,
+                component_type=FLOAT,
+                count=vcount,
+                type_str="VEC3",
+                byte_offset=0,
+                minv=mn,
+                maxv=mx,
+            )
+            acc_nrm = binb.add_accessor(
+                buffer_view=bv_idx,
+                component_type=FLOAT,
+                count=vcount,
+                type_str="VEC3",
+                byte_offset=12,
+            )
+            return acc_pos, acc_nrm
+
+        # Non-interleaved path; optionally include normals as separate view
+        acc_nrm = None
+        bv_pos = binb.add_view(pos_f32.tobytes(order="C"), ARRAY_BUFFER)
+        acc_pos = binb.add_accessor(
+            buffer_view=bv_pos,
+            component_type=FLOAT,
+            count=vcount,
+            type_str="VEC3",
+            minv=mn,
+            maxv=mx,
+        )
+        if include_normals and normals_2d is not None:
+            nrm_f32, ncount = _ensure_float32_xyz(normals_2d)
+            if ncount == vcount:
+                if do_flip:
+                    nrm_f32 = (-nrm_f32).astype(np.float32, copy=False)
+                bv_nrm = binb.add_view(nrm_f32.tobytes(order="C"), ARRAY_BUFFER)
+                acc_nrm = binb.add_accessor(
+                    buffer_view=bv_nrm,
+                    component_type=FLOAT,
+                    count=vcount,
+                    type_str="VEC3",
+                )
+            else:
+                logging.warning(
+                    "NORMAL count mismatch; ignoring normals (vcount=%d, ncount=%d)",
+                    vcount,
+                    ncount,
+                )
+        return acc_pos, acc_nrm
+
+    def pack_indices(idx_u32: np.ndarray) -> tuple[int, int, np.ndarray]:
+        """Choose smallest component type, add view + accessor. Returns (acc_idx, comp_type, packed_arr)."""
+        if idx_u32.size == 0:
+            # Should not happen here; caller checks empties
+            bv_idx = binb.add_view(idx_u32.tobytes(order="C"), ELEMENT_ARRAY_BUFFER)
+            acc_idx = binb.add_accessor(
+                buffer_view=bv_idx,
+                component_type=UNSIGNED_INT,
+                count=0,
+                type_str="SCALAR",
+            )
+            return acc_idx, UNSIGNED_INT, idx_u32
+        max_idx = int(idx_u32.max())
+        if max_idx <= 65535:
+            comp = UNSIGNED_SHORT
+            arr = idx_u32.astype(np.uint16, copy=False)
+        else:
+            comp = UNSIGNED_INT
+            arr = idx_u32
+        bv_idx = binb.add_view(arr.tobytes(order="C"), ELEMENT_ARRAY_BUFFER)
+        acc_idx = binb.add_accessor(
+            buffer_view=bv_idx,
+            component_type=comp,
+            count=arr.size,
+            type_str="SCALAR",
+        )
+        return acc_idx, comp, arr
+
+    # ----- Build GLTF skeleton -----
+    gltf = GLTF2(scene=0, scenes=g["scenes"])
 
     # Materials
-    materials_in = g.get("materials", [])
-    materials_out: List[GLTFMaterial] = []
-    for m in materials_in:
+    mats_in = g.get("materials", [])
+    mats_out: List[GLTFMaterial] = []
+    for m in mats_in:
         base = m.get("baseColorFactor", [0.78, 0.78, 0.78, 1.0])
         pbr = GLTFPBR(baseColorFactor=base)
         if metallic_factor is not None:
             pbr.metallicFactor = float(metallic_factor)
         if roughness_factor is not None:
             pbr.roughnessFactor = float(roughness_factor)
-        materials_out.append(GLTFMaterial(pbrMetallicRoughness=pbr))
-    gltf.materials = materials_out
+        mats_out.append(GLTFMaterial(pbrMetallicRoughness=pbr))
+    gltf.materials = mats_out
 
-    # Build a single binary buffer via BinBuilder
-    # Meshes/Primitives/Attributes/Accessors/BufferViews
+    # Binary builder and meshes
     binb = BinBuilder()
     gltf_meshes: List[GLTFMesh] = []
     for mesh_idx, mesh in enumerate(g.get("meshes", [])):
         prims_out: List[GLTFPrimitive] = []
         for prim_idx, prim in enumerate(mesh.get("primitives", [])):
-            points = prim.get("points", None)
-            # New: points is (N,6) interleaved [x y z nx ny nz]; normals key removed in C++ layer.
-            normals = None
             faces = prim.get("faces", None)
             material_idx = prim.get("material")
-            # Convert to NumPy arrays
-            # Accept (N,3) legacy or (N,6) new layout. If (N,6), slice.
-            if points is not None:
-                arr_pts = np.asarray(points)
-                if arr_pts.ndim == 2 and arr_pts.shape[1] == 6:
-                    # Separate position and normals; even if include_normals=False we keep pos only.
-                    pos_part = arr_pts[:, :3]
-                    if include_normals:
-                        normals = arr_pts[:, 3:6]
-                    points = pos_part
-            pos_f32, vcount = _ensure_float32_xyz(points)
+
+            # 1) Positions, normals, counts
+            pos_f32, vcount, normals_2d, interleaved_src = extract_positions_normals(prim)
             idx_u32 = _ensure_uint32_indices(faces)
             if vcount == 0 or idx_u32.size == 0:
                 logging.warning(
-                    f"Empty primitive skipped (mesh {mesh_idx}, prim {prim_idx})"
+                    "Empty primitive skipped (mesh %d, prim %d)", mesh_idx, prim_idx
                 )
                 continue
-            # If not exporting normals and cleaning enabled, run a lightweight clean to deduplicate
-            # vertices/faces and drop degenerates for each primitive mesh.
+
+            # 2) Optional clean (only when normals are not exported)
             if (not include_normals) and clean:
                 pos_f32, idx_u32 = w.clean_mesh(pos_f32, idx_u32)
-                vcount = 0 if pos_f32.size == 0 else pos_f32.size // 3
+                vcount = pos_f32.size // 3 if pos_f32.size else 0
                 if vcount == 0 or idx_u32.size == 0:
                     logging.warning(
-                        f"Primitive became empty after clean (mesh {mesh_idx}, prim {prim_idx})"
+                        "Primitive became empty after clean (mesh %d, prim %d)",
+                        mesh_idx,
+                        prim_idx,
                     )
                     continue
-            # Decide whether to flip winding
-            do_flip = False
-            if winding == "flip":
-                do_flip = True
-            elif winding == "auto":
-                signed = _estimate_orientation_signed_volume(pos_f32, idx_u32)
-                do_flip = signed < 0.0
+
+            # 3) Winding
+            do_flip = compute_winding_flip(pos_f32, idx_u32)
             if do_flip:
                 idx_u32 = _flip_winding_u32(idx_u32)
-            # Pack positions (float32)
-            bv_pos_idx = binb.add_view(pos_f32.tobytes(order="C"), ARRAY_BUFFER)
-            # Pack normals (float32) if requested and length matches
-            has_normals = False
-            if include_normals and normals is not None:
-                nrm_f32, ncount = _ensure_float32_xyz(normals)
-                has_normals = ncount == vcount
-                if not has_normals:
-                    logging.warning(
-                        f"NORMAL count mismatch; ignoring normals (mesh {mesh_idx}, prim {prim_idx})"
-                    )
-                if has_normals:
-                    # If we flipped winding, also invert normals to keep lighting consistent
-                    if do_flip:
-                        nrm_f32 = (-nrm_f32).astype(np.float32, copy=False)
-                    bv_nrm_idx = binb.add_view(nrm_f32.tobytes(order="C"), ARRAY_BUFFER)
-            # Pick smallest index component type and pack indices
-            idx_comp_type = UNSIGNED_INT
-            idx_arr = idx_u32
-            if idx_u32.size:
-                max_idx = int(idx_u32.max())
-                if max_idx <= 65535:
-                    idx_comp_type = UNSIGNED_SHORT
-                    idx_arr = idx_u32.astype(np.uint16, copy=False)
 
-            bv_idx_idx = binb.add_view(idx_arr.tobytes(order="C"), ELEMENT_ARRAY_BUFFER)
-
-            # Accessors
-            pos_reshaped = pos_f32.reshape((-1, 3))
-            mn = pos_reshaped.min(axis=0).astype(np.float32).tolist()
-            mx = pos_reshaped.max(axis=0).astype(np.float32).tolist()
-            acc_pos_idx = binb.add_accessor(
-                buffer_view=bv_pos_idx,
-                component_type=FLOAT,
-                count=vcount,
-                type_str="VEC3",
-                minv=mn,
-                maxv=mx,
+            # 4) Pack vertices and indices
+            acc_pos_idx, acc_nrm_idx = pack_vertices(
+                pos_f32, vcount, normals_2d, interleaved_src, do_flip
             )
-            if has_normals:
-                acc_nrm_idx = binb.add_accessor(
-                    buffer_view=bv_nrm_idx,  # type: ignore
-                    component_type=FLOAT,
-                    count=vcount,
-                    type_str="VEC3",
-                )
-            acc_idx_idx = binb.add_accessor(
-                buffer_view=bv_idx_idx,
-                component_type=idx_comp_type,
-                count=idx_arr.size,
-                type_str="SCALAR",
-            )
+            acc_idx_idx, _, _ = pack_indices(idx_u32)
 
+            # 5) Assemble primitive
             prim_out = GLTFPrimitive()
-            prim_out.attributes.POSITION = acc_pos_idx
-            if has_normals:
+            prim_out.attributes.POSITION = acc_pos_idx  # type: ignore
+            if acc_nrm_idx is not None:
                 prim_out.attributes.NORMAL = acc_nrm_idx  # type: ignore
             prim_out.indices = acc_idx_idx
             prim_out.mode = 4  # TRIANGLES
             if material_idx is not None:
                 prim_out.material = int(material_idx)
             prims_out.append(prim_out)
+
         if prims_out:
             gltf_meshes.append(GLTFMesh(primitives=prims_out))
         else:
-            logging.warning(f"Mesh {mesh_idx} has no valid primitives")
+            logging.warning("Mesh %d has no valid primitives", mesh_idx)
+
+    # Finalize GLTF structure
     gltf.meshes = gltf_meshes
     gltf.buffers = [GLTFBuffer(byteLength=len(binb.blob))]
     gltf.bufferViews = binb.buffer_views
     gltf.accessors = binb.accessors
-    # Attach binary and save
     gltf.set_binary_blob(bytes(binb.blob))
 
     # Nodes and Scenes
@@ -494,9 +576,7 @@ def gltf_like_to_glb(
     gltf.scenes = [GLTFScene(nodes=s.get("nodes", [])) for s in g.get("scenes", [])]
 
     if out_path:
-        gltf.save(
-            out_path, asset=GLTFAsset(version="2.0", generator="pywebifc-glb-exporter")
-        )
+        gltf.save(out_path, asset=GLTFAsset(version="2.0", generator="pywebifc-glb-exporter"))
     return gltf
 
 
