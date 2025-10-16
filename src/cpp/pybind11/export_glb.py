@@ -8,8 +8,8 @@ Pipeline:
   - pack into a valid GLB (glTF 2.0) without external deps
 
 Usage:
-  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--noClean]
-  python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--noClean]
+  python -m pybind11.export_glb input.ifc output.glb [--types 123 456] [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--doubleSided] [--noClean]
+  python pybind11/export_glb.py input.ifc output.glb [--normals] [--winding {as-is,flip,auto}] [--metallicFactor 0.5] [--roughnessFactor 0.8] [--doubleSided] [--noClean]
 
 Notes:
     - Underlying C++ now always provides an interleaved (N,6) float array per primitive:
@@ -22,6 +22,7 @@ Notes:
   - Materials map to pbrMetallicRoughness(baseColorFactor). If
     --metallicFactor/--roughnessFactor are provided, they are written to GLB;
     otherwise these fields are omitted (glTF defaults apply).
+  - --doubleSided marks all materials as double-sided in the GLB.
   - When normals are not exported, a lightweight NumPy-based clean runs per
     primitive to deduplicate identical vertices and faces, drop degenerate
     triangles, and compact unused vertices (similar to pyvista.clean but exact
@@ -346,6 +347,7 @@ def gltf_like_to_glb(
     metallic_factor: Optional[float] = None,
     roughness_factor: Optional[float] = None,
     clean: bool = True,
+    double_sided: bool = False,
 ) -> GLTF2:
 
     # ----- Helpers (local, keep namespace clean) -----
@@ -463,7 +465,10 @@ def gltf_like_to_glb(
             pbr.metallicFactor = float(metallic_factor)
         if roughness_factor is not None:
             pbr.roughnessFactor = float(roughness_factor)
-        mats_out.append(GLTFMaterial(pbrMetallicRoughness=pbr))
+        if double_sided:
+            mats_out.append(GLTFMaterial(pbrMetallicRoughness=pbr, doubleSided=True))
+        else:
+            mats_out.append(GLTFMaterial(pbrMetallicRoughness=pbr))
     gltf.materials = mats_out
 
     # Binary builder and meshes
@@ -671,6 +676,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Optional roughnessFactor (0..1). If omitted, not written",
     )
     ap.add_argument(
+        "--doubleSided",
+        action="store_true",
+        help="Mark all materials as double-sided (render both faces)",
+    )
+    ap.add_argument(
         "--noClean",
         dest="clean",
         action="store_false",
@@ -741,6 +751,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 metallic_factor=args.metallicFactor,
                 roughness_factor=args.roughnessFactor,
                 clean=args.clean,
+                double_sided=args.doubleSided,
             )
     finally:
         w.close_model(mid)
